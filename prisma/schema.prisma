@@ -1,0 +1,355 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OAuthConnectionStatus {
+  DISCONNECTED
+  ACTIVE
+  NEEDS_REAUTH
+}
+
+enum SyncRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum IngestionRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+  CANCELLED
+}
+
+enum TriggerSource {
+  MANUAL
+  SCHEDULER
+}
+
+enum IngestionAccountRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum SheetWriteMode {
+  APPEND
+  OVERWRITE
+  UPSERT
+}
+
+enum SheetDataMode {
+  CAMPAIGN
+  DAILY_TOTAL
+}
+
+enum SheetColumnMode {
+  ALL
+  MANUAL
+}
+
+enum SheetRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+  SKIPPED
+  CANCELLED
+}
+
+model GoogleOAuthConnection {
+  id                    String                @id @default("GOOGLE")
+  status                OAuthConnectionStatus @default(DISCONNECTED)
+  clientId              String?
+  scopesCsv             String                @default("")
+  encryptedRefreshToken String?
+  refreshTokenExpiresAt DateTime?
+  tokenIssuedAt         DateTime?
+  lastTokenRefreshAt    DateTime?
+  tokenWarningSentAt    DateTime?
+  grantedEmail          String?
+  managerCustomerId     String?
+  connectedAt           DateTime?
+  disconnectedAt        DateTime?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  oauthStates GoogleOAuthState[]
+  syncRuns    GoogleAdsSyncRun[]
+  accounts    AdsAccount[]
+}
+
+model GoogleOAuthState {
+  id           String   @id @default(cuid())
+  stateHash    String   @unique
+  redirectPath String?
+  expiresAt    DateTime
+  usedAt       DateTime?
+  createdAt    DateTime @default(now())
+  connectionId String
+
+  connection GoogleOAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt, usedAt])
+}
+
+model GoogleAdsSyncRun {
+  id              String        @id @default(cuid())
+  status          SyncRunStatus @default(RUNNING)
+  startedAt       DateTime      @default(now())
+  finishedAt      DateTime?
+  totalSeen       Int           @default(0)
+  discoveredCount Int           @default(0)
+  reappearedCount Int           @default(0)
+  detachedCount   Int           @default(0)
+  errorSummary    String?
+  connectionId    String
+
+  connection GoogleOAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([startedAt, status])
+}
+
+model AdsAccount {
+  id               String   @id @default(cuid())
+  customerId       String   @unique
+  descriptiveName  String
+  currencyCode     String?
+  timeZone         String?
+  googleStatus     String?
+  isManager        Boolean  @default(false)
+  hierarchyLevel   Int?
+  isInMcc          Boolean  @default(true)
+  ingestionEnabled Boolean  @default(true)
+  firstSeenAt      DateTime @default(now())
+  lastSeenAt       DateTime @default(now())
+  lastSyncedAt     DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  connectionId     String
+
+  connection      GoogleOAuthConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  facts           CampaignDailyFact[]
+  ingestionRuns   IngestionAccountRun[]
+  sheetConfig     AccountSheetConfig?
+  manualSheetRangeRuns SheetManualRangeRun[]
+
+  @@index([isInMcc, ingestionEnabled, googleStatus])
+}
+
+model IngestionRun {
+  id                String             @id @default(cuid())
+  runDate           DateTime
+  dateFrom          DateTime
+  dateTo            DateTime
+  status            IngestionRunStatus @default(RUNNING)
+  triggerSource     TriggerSource      @default(MANUAL)
+  startedAt         DateTime           @default(now())
+  finishedAt        DateTime?
+  totalAccounts     Int                @default(0)
+  processedAccounts Int                @default(0)
+  successAccounts   Int                @default(0)
+  failedAccounts    Int                @default(0)
+  skippedAccounts   Int                @default(0)
+  rowsUpserted      Int                @default(0)
+  errorSummary      String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  accountRuns IngestionAccountRun[]
+  facts       CampaignDailyFact[]
+
+  @@index([runDate, triggerSource, status, startedAt])
+}
+
+model IngestionAccountRun {
+  id           String                   @id @default(cuid())
+  runDate      DateTime
+  status       IngestionAccountRunStatus @default(RUNNING)
+  rowsUpserted Int                      @default(0)
+  errorSummary String?
+  startedAt    DateTime                 @default(now())
+  finishedAt   DateTime?
+  createdAt    DateTime                 @default(now())
+  runId        String
+  adsAccountId String
+
+  run        IngestionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  adsAccount AdsAccount   @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, adsAccountId, runDate])
+  @@index([status, finishedAt])
+}
+
+model CampaignDailyFact {
+  id                  String   @id @default(cuid())
+  factDate            DateTime
+  customerId          String
+  campaignId          String
+  campaignName        String
+  campaignStatus      String
+  impressions         Int
+  clicks              Int
+  ctrPercent          Float
+  averageCpc          Float
+  cost                Float
+  conversions         Float
+  costPerConversion   Float
+  finalUrlSuffix      String?
+  trackingUrlTemplate String?
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmTerm             String?
+  utmContent          String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  adsAccountId        String
+  sourceRunId         String?
+
+  adsAccount AdsAccount    @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+  sourceRun  IngestionRun? @relation(fields: [sourceRunId], references: [id], onDelete: SetNull)
+
+  @@unique([factDate, adsAccountId, campaignId])
+  @@index([factDate, adsAccountId])
+}
+
+model AccountSheetConfig {
+  id                  String         @id @default(cuid())
+  adsAccountId        String         @unique
+  spreadsheetId       String
+  sheetName           String
+  writeMode           SheetWriteMode @default(UPSERT)
+  dataMode            SheetDataMode  @default(CAMPAIGN)
+  columnMode          SheetColumnMode @default(ALL)
+  selectedColumnsCsv  String         @default("")
+  campaignStatusesCsv String         @default("")
+  active              Boolean        @default(true)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  adsAccount AdsAccount      @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+  runs       SheetExportRun[]
+  rowStates  SheetRowState[]
+
+  @@index([active, createdAt])
+}
+
+model SheetExportRun {
+  id           String        @id @default(cuid())
+  runDate      DateTime
+  status       SheetRunStatus @default(RUNNING)
+  triggerSource TriggerSource @default(MANUAL)
+  startedAt    DateTime      @default(now())
+  finishedAt   DateTime?
+  rowsPrepared Int           @default(0)
+  rowsWritten  Int           @default(0)
+  rowsSkipped  Int           @default(0)
+  rowsFailed   Int           @default(0)
+  errorSummary String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  configId     String
+
+  config    AccountSheetConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  rowStates SheetRowState[]
+
+  @@index([runDate, triggerSource, status, startedAt])
+  @@index([configId, startedAt])
+}
+
+model SheetRowState {
+  id             String   @id @default(cuid())
+  configId       String
+  rowKey         String
+  rowHash        String
+  rowIndex       Int?
+  lastExportedAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  lastRunId      String?
+
+  config  AccountSheetConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  lastRun SheetExportRun?    @relation(fields: [lastRunId], references: [id], onDelete: SetNull)
+
+  @@unique([configId, rowKey])
+  @@index([configId, lastExportedAt])
+}
+
+model SheetManualRangeRun {
+  id                  String          @id @default(cuid())
+  adsAccountId        String
+  spreadsheetId       String
+  sheetName           String
+  writeMode           SheetWriteMode  @default(UPSERT)
+  dataMode            SheetDataMode   @default(CAMPAIGN)
+  columnMode          SheetColumnMode @default(ALL)
+  selectedColumnsCsv  String          @default("")
+  campaignStatusesCsv String          @default("")
+  dateFrom            DateTime
+  dateTo              DateTime
+  totalDays           Int
+  completedDays       Int             @default(0)
+  successDays         Int             @default(0)
+  failedDays          Int             @default(0)
+  status              SheetRunStatus  @default(RUNNING)
+  startedAt           DateTime        @default(now())
+  finishedAt          DateTime?
+  errorSummary        String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  adsAccount AdsAccount               @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+  dayRuns    SheetManualRangeRunDay[]
+
+  @@index([status, startedAt])
+  @@index([adsAccountId, startedAt])
+}
+
+model SheetManualRangeRunDay {
+  id           String        @id @default(cuid())
+  manualRunId  String
+  runDate      DateTime
+  status       SheetRunStatus @default(RUNNING)
+  rowsPrepared Int           @default(0)
+  rowsWritten  Int           @default(0)
+  rowsSkipped  Int           @default(0)
+  rowsFailed   Int           @default(0)
+  errorSummary String?
+  startedAt    DateTime      @default(now())
+  finishedAt   DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  manualRun SheetManualRangeRun @relation(fields: [manualRunId], references: [id], onDelete: Cascade)
+
+  @@unique([manualRunId, runDate])
+  @@index([status, runDate])
+}
+
+model SchedulerSettings {
+  id                        String   @id @default("GLOBAL")
+  timezone                  String   @default("Europe/Kyiv")
+  ingestionEnabled          Boolean  @default(true)
+  ingestionHour             Int      @default(1)
+  ingestionMinute           Int      @default(0)
+  ingestionMaxDailyAttempts Int      @default(2)
+  ingestionRetryDelayMin    Int      @default(20)
+  ingestionBatchSize        Int      @default(100)
+  ingestionMaxAccounts      Int      @default(5000)
+  sheetsEnabled             Boolean  @default(true)
+  sheetsHour                Int      @default(1)
+  sheetsMinute              Int      @default(10)
+  sheetsMaxDailyAttempts    Int      @default(2)
+  sheetsRetryDelayMin       Int      @default(20)
+  sheetsMaxConfigsPerTick   Int      @default(200)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}

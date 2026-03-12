@@ -1,0 +1,10 @@
+node_modules
+web/node_modules
+dist
+web/dist
+.git
+.idea
+.DS_Store
+.env
+npm-debug.log*
+web/npm-debug.log*

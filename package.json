@@ -1,0 +1,49 @@
+{
+  "name": "ads-mvp-report",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Google Ads -> DB -> Google Sheets MVP",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "build": "npm run web:build && tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "deploy:up": "docker compose -f docker-compose.deploy.yml up -d --build",
+    "deploy:down": "docker compose -f docker-compose.deploy.yml down",
+    "deploy:logs": "docker compose -f docker-compose.deploy.yml logs -f app",
+    "web:typecheck": "npm --prefix web run typecheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit && npm run web:typecheck",
+    "lint": "npm run typecheck",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run lint && npm run test && npm run build",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:status": "prisma migrate status"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.6.0",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "google-auth-library": "^9.15.1",
+    "pino": "^9.3.2",
+    "pino-http": "^10.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.11",
+    "prisma": "^6.6.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}

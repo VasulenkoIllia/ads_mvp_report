@@ -1,0 +1,63 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: adsmvp-app
+    env_file:
+      - .env.deploy
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4010
+      TZ: Europe/Kyiv
+      CORS_ORIGIN: ${DEPLOY_CORS_ORIGIN:-https://adsmvp.workflo.space}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ads_mvp_report}:${POSTGRES_PASSWORD:-ads_mvp_report}@db:5432/${POSTGRES_DB:-ads_mvp_report}?schema=public
+    restart: unless-stopped
+    networks:
+      - app-net
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.adsmvp.rule=Host(`adsmvp.workflo.space`)"
+      - "traefik.http.routers.adsmvp.entrypoints=websecure"
+      - "traefik.http.routers.adsmvp.tls.certresolver=cf"
+      - "traefik.http.services.adsmvp.loadbalancer.server.port=4010"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:4010/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  db:
+    image: postgres:16-alpine
+    container_name: adsmvp-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ads_mvp_report}
+      POSTGRES_USER: ${POSTGRES_USER:-ads_mvp_report}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ads_mvp_report}
+      TZ: Europe/Kyiv
+    ports:
+      - "127.0.0.1:15434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ads_mvp_report} -d ${POSTGRES_DB:-ads_mvp_report}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - adsmvp_pg_data:/var/lib/postgresql/data
+    networks:
+      - app-net
+
+volumes:
+  adsmvp_pg_data:
+
+networks:
+  app-net:
+    driver: bridge
+  proxy:
+    external: true
