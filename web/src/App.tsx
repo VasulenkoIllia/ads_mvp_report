@@ -384,6 +384,23 @@ function formatDate(value: string | null | undefined): string {
   return parsed.toLocaleString('uk-UA');
 }
 
+function formatGoogleAdsCustomerId(value: string | null | undefined): string {
+  if (!value) {
+    return '-';
+  }
+
+  const digitsOnly = value.replace(/\D/g, '');
+  if (digitsOnly.length !== 10) {
+    return value;
+  }
+
+  return `${digitsOnly.slice(0, 3)}-${digitsOnly.slice(3, 6)}-${digitsOnly.slice(6, 10)}`;
+}
+
+function normalizeGoogleAdsCustomerId(value: string | null | undefined): string {
+  return (value ?? '').replace(/\D/g, '');
+}
+
 function formatDateOnly(value: string | null | undefined): string {
   if (!value) {
     return '-';
@@ -1167,7 +1184,7 @@ export function App() {
     {
       title: 'Customer ID',
       dataIndex: 'adsAccount',
-      render: (_, row) => row.adsAccount?.customerId ?? '-'
+      render: (_, row) => formatGoogleAdsCustomerId(row.adsAccount?.customerId)
     },
     {
       title: 'Статус',
@@ -1197,7 +1214,7 @@ export function App() {
       dataIndex: 'config',
       render: (_, row) => {
         const account = row.config?.adsAccount;
-        return account ? `${account.descriptiveName} (${account.customerId})` : '-';
+        return account ? `${account.descriptiveName} (${formatGoogleAdsCustomerId(account.customerId)})` : '-';
       }
     },
     {
@@ -1251,7 +1268,7 @@ export function App() {
       title: 'Акаунт',
       dataIndex: 'adsAccount',
       render: (_, row) =>
-        row.adsAccount ? `${row.adsAccount.descriptiveName} (${row.adsAccount.customerId})` : '-'
+        row.adsAccount ? `${row.adsAccount.descriptiveName} (${formatGoogleAdsCustomerId(row.adsAccount.customerId)})` : '-'
     },
     {
       title: 'Прогрес',
@@ -1325,7 +1342,7 @@ export function App() {
       render: (_, row) => (
         <Space direction="vertical" size={0}>
           <Text strong>{row.descriptiveName}</Text>
-          <Text type="secondary">{row.customerId}</Text>
+          <Text type="secondary">{formatGoogleAdsCustomerId(row.customerId)}</Text>
         </Space>
       )
     },
@@ -1384,7 +1401,7 @@ export function App() {
   const activeAccountOptions = accounts
     .filter((item) => isActiveGoogleAccountStatus(item.googleStatus))
     .map((item) => ({
-      label: `${item.descriptiveName} (${item.customerId})`,
+      label: `${item.descriptiveName} (${formatGoogleAdsCustomerId(item.customerId)})`,
       value: item.id
     }));
 
@@ -1404,6 +1421,7 @@ export function App() {
 
   const filteredAccounts = useMemo(() => {
     const query = accountsQuery.trim().toLowerCase();
+    const queryCustomerId = normalizeGoogleAdsCustomerId(query);
 
     return accounts.filter((item) => {
       const activeByGoogleStatus = isActiveGoogleAccountStatus(item.googleStatus);
@@ -1428,9 +1446,15 @@ export function App() {
         return true;
       }
 
+      const rawCustomerId = item.customerId.toLowerCase();
+      const formattedCustomerId = formatGoogleAdsCustomerId(item.customerId).toLowerCase();
+      const normalizedCustomerId = normalizeGoogleAdsCustomerId(item.customerId);
+
       return (
         item.descriptiveName.toLowerCase().includes(query) ||
-        item.customerId.toLowerCase().includes(query) ||
+        rawCustomerId.includes(query) ||
+        formattedCustomerId.includes(query) ||
+        (queryCustomerId.length > 0 && normalizedCustomerId.includes(queryCustomerId)) ||
         (item.sheetConfig?.sheetName ?? '').toLowerCase().includes(query)
       );
     });
