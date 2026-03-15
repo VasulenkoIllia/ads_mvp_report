@@ -34,6 +34,8 @@ const listConfigsQuerySchema = z.object({
 });
 
 const upsertConfigSchema = z.object({
+  configId: z.string().min(1).optional(),
+  createNew: z.boolean().optional(),
   spreadsheetId: z.string().min(10),
   sheetName: z.string().min(1).max(120),
   writeMode: z.nativeEnum(SheetWriteMode).optional(),
@@ -42,6 +44,8 @@ const upsertConfigSchema = z.object({
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
   campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
   active: z.boolean().optional()
+}).refine((value) => !(value.configId && value.createNew), {
+  message: 'configId and createNew cannot be used together.'
 });
 
 const runSchema = z.object({
@@ -160,6 +164,8 @@ sheetsRouter.put(
 
     const result = await upsertSheetExportConfig({
       adsAccountId: req.params.accountId,
+      configId: payload.configId,
+      createNew: payload.createNew,
       spreadsheetId: payload.spreadsheetId,
       sheetName: payload.sheetName,
       writeMode: payload.writeMode,

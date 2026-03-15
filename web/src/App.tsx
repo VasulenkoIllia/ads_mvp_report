@@ -95,7 +95,8 @@ type SheetConfig = {
 };
 
 type AccountRow = AdsAccount & {
-  sheetConfig: SheetConfig | null;
+  sheetConfigs: SheetConfig[];
+  primarySheetConfig: SheetConfig | null;
 };
 
 type IngestionRun = {
@@ -525,6 +526,7 @@ export function App() {
   const [manualRangeRunDrawerLoading, setManualRangeRunDrawerLoading] = useState(false);
   const [selectedManualRangeRun, setSelectedManualRangeRun] = useState<SheetManualRangeRun | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<AccountRow | null>(null);
+  const [selectedDrawerConfigId, setSelectedDrawerConfigId] = useState<string | null>(null);
   const [accountsQuery, setAccountsQuery] = useState('');
   const [accountsIngestionFilter, setAccountsIngestionFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [accountsStatusFilter, setAccountsStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
@@ -584,11 +586,20 @@ export function App() {
       request<{ items: SheetConfig[] }>('/api/v1/sheets/configs?take=500')
     ]);
 
-    const configByAccount = new Map(configsResp.items.map((config) => [config.adsAccountId, config]));
+    const configByAccount = new Map<string, SheetConfig[]>();
+    for (const config of configsResp.items) {
+      const list = configByAccount.get(config.adsAccountId);
+      if (list) {
+        list.push(config);
+      } else {
+        configByAccount.set(config.adsAccountId, [config]);
+      }
+    }
 
     const rows: AccountRow[] = accountsResp.items.map((item) => ({
       ...item,
-      sheetConfig: configByAccount.get(item.id) ?? null
+      sheetConfigs: configByAccount.get(item.id) ?? [],
+      primarySheetConfig: configByAccount.get(item.id)?.[0] ?? null
     }));
 
     setAccounts(rows);
@@ -736,20 +747,54 @@ export function App() {
     }
   };
 
+  const applyAccountConfigToDrawerForm = useCallback(
+    (account: AccountRow, config: SheetConfig | null) => {
+      configForm.setFieldsValue({
+        ingestionEnabled: account.ingestionEnabled,
+        spreadsheetId: config?.spreadsheetId ?? '',
+        sheetName: config?.sheetName ?? '',
+        active: config?.active ?? true,
+        writeMode: config?.writeMode ?? 'UPSERT',
+        dataMode: config?.dataMode ?? 'CAMPAIGN',
+        columnMode: config?.columnMode ?? 'ALL',
+        selectedColumns: config?.selectedColumns ?? [],
+        campaignStatuses: config?.campaignStatuses ?? []
+      });
+    },
+    [configForm]
+  );
+
   const openConfigDrawer = (account: AccountRow) => {
+    const initialConfig = account.primarySheetConfig ?? null;
     setSelectedAccount(account);
-    configForm.setFieldsValue({
-      ingestionEnabled: account.ingestionEnabled,
-      spreadsheetId: account.sheetConfig?.spreadsheetId ?? '',
-      sheetName: account.sheetConfig?.sheetName ?? '',
-      active: account.sheetConfig?.active ?? true,
-      writeMode: account.sheetConfig?.writeMode ?? 'UPSERT',
-      dataMode: account.sheetConfig?.dataMode ?? 'CAMPAIGN',
-      columnMode: account.sheetConfig?.columnMode ?? 'ALL',
-      selectedColumns: account.sheetConfig?.selectedColumns ?? [],
-      campaignStatuses: account.sheetConfig?.campaignStatuses ?? []
-    });
+    setSelectedDrawerConfigId(initialConfig?.id ?? null);
+    applyAccountConfigToDrawerForm(account, initialConfig);
     setDrawerOpen(true);
+  };
+
+  const handleSelectDrawerConfig = (value: string) => {
+    if (!selectedAccount) {
+      return;
+    }
+
+    if (value === '__new__') {
+      setSelectedDrawerConfigId(null);
+      applyAccountConfigToDrawerForm(selectedAccount, null);
+      return;
+    }
+
+    const matched = selectedAccount.sheetConfigs.find((item) => item.id === value) ?? null;
+    setSelectedDrawerConfigId(matched?.id ?? null);
+    applyAccountConfigToDrawerForm(selectedAccount, matched);
+  };
+
+  const handleStartNewConfig = () => {
+    if (!selectedAccount) {
+      return;
+    }
+
+    setSelectedDrawerConfigId(null);
+    applyAccountConfigToDrawerForm(selectedAccount, null);
   };
 
   const handleSaveConfig = async () => {
@@ -782,6 +827,8 @@ export function App() {
         await request(`/api/v1/sheets/configs/${selectedAccount.id}`, {
           method: 'PUT',
           json: {
+            configId: selectedDrawerConfigId ?? undefined,
+            createNew: selectedDrawerConfigId === null,
             spreadsheetId,
             sheetName,
             writeMode: values.writeMode,
@@ -805,13 +852,13 @@ export function App() {
   };
 
   const handleDeleteConfig = async () => {
-    if (!selectedAccount?.sheetConfig?.id) {
-      message.warning('Для акаунта ще немає config.');
+    if (!selectedDrawerConfigId) {
+      message.warning('Оберіть існуючий config для видалення.');
       return;
     }
 
     try {
-      await request(`/api/v1/sheets/configs/${selectedAccount.sheetConfig.id}`, {
+      await request(`/api/v1/sheets/configs/${selectedDrawerConfigId}`, {
         method: 'DELETE'
       });
       message.success('Sheet config видалено.');
@@ -1368,15 +1415,23 @@ export function App() {
       title: 'Sheets Config',
       key: 'sheet',
       render: (_, row) => {
-        if (!row.sheetConfig) {
+        if (row.sheetConfigs.length === 0) {
           return <Tag color="default">Не налаштовано</Tag>;
         }
 
+        const activeCount = row.sheetConfigs.filter((item) => item.active).length;
+        const preview = row.sheetConfigs
+          .slice(0, 2)
+          .map((item) => item.sheetName)
+          .join(', ');
+        const extraCount = row.sheetConfigs.length - 2;
+
         return (
           <Space direction="vertical" size={0}>
-            <Text>{row.sheetConfig.sheetName}</Text>
+            <Text>{activeCount}/{row.sheetConfigs.length} active config(s)</Text>
             <Text type="secondary">
-              {row.sheetConfig.writeMode} / {row.sheetConfig.dataMode}
+              {preview}
+              {extraCount > 0 ? ` (+${extraCount})` : ''}
             </Text>
           </Space>
         );
@@ -1455,7 +1510,10 @@ export function App() {
         rawCustomerId.includes(query) ||
         formattedCustomerId.includes(query) ||
         (queryCustomerId.length > 0 && normalizedCustomerId.includes(queryCustomerId)) ||
-        (item.sheetConfig?.sheetName ?? '').toLowerCase().includes(query)
+        item.sheetConfigs.some(
+          (config) =>
+            config.sheetName.toLowerCase().includes(query) || config.spreadsheetId.toLowerCase().includes(query)
+        )
       );
     });
   }, [accounts, accountsQuery, accountsIngestionFilter, accountsStatusFilter]);
@@ -1614,15 +1672,19 @@ export function App() {
       <Drawer
         title={selectedAccount ? `Configure ${selectedAccount.descriptiveName}` : 'Configure Account'}
         open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
+        onClose={() => {
+          setDrawerOpen(false);
+          setSelectedDrawerConfigId(null);
+        }}
         width={560}
         extra={
           <Space>
-            {selectedAccount?.sheetConfig?.id ? (
+            {selectedDrawerConfigId ? (
               <Button danger onClick={() => void handleDeleteConfig()}>
                 Delete config
               </Button>
             ) : null}
+            <Button onClick={() => handleStartNewConfig()}>New config</Button>
             <Button type="primary" loading={drawerSaving} onClick={() => void handleSaveConfig()}>
               Save
             </Button>
@@ -1633,6 +1695,22 @@ export function App() {
           <Form.Item name="ingestionEnabled" label="Ingestion enabled" valuePropName="checked">
             <Switch />
           </Form.Item>
+
+          {selectedAccount ? (
+            <Form.Item label="Configs for account">
+              <Select
+                value={selectedDrawerConfigId ?? '__new__'}
+                onChange={handleSelectDrawerConfig}
+                options={[
+                  ...selectedAccount.sheetConfigs.map((config) => ({
+                    value: config.id,
+                    label: `${config.sheetName} (${config.dataMode}, ${config.active ? 'active' : 'inactive'})`
+                  })),
+                  { value: '__new__', label: '+ New config' }
+                ]}
+              />
+            </Form.Item>
+          ) : null}
 
           <Row gutter={12}>
             <Col span={12}>

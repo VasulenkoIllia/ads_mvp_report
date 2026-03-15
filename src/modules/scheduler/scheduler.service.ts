@@ -13,7 +13,11 @@ import {
   markStaleIngestionRunsAsFailed,
   runGoogleAdsIngestion
 } from '../ingestion/ingestion.service.js';
-import { markStaleSheetRunsAsFailed, recoverRunningManualRangeRuns, runSheetExports } from '../sheets/sheets.service.js';
+import {
+  markStaleSheetRunsAsFailed,
+  recoverRunningManualRangeRuns,
+  runSheetExportConfigById
+} from '../sheets/sheets.service.js';
 
 type SchedulerLogger = {
   info: (...args: unknown[]) => void;
@@ -396,8 +400,7 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
     },
     take: settings.sheetsMaxConfigsPerTick,
     select: {
-      id: true,
-      adsAccountId: true
+      id: true
     }
   });
 
@@ -458,9 +461,9 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
       }
 
       try {
-        const result = await runSheetExports({
-          runDate: runDateText,
-          accountId: config.adsAccountId,
+        const result = await runSheetExportConfigById({
+          configId: config.id,
+          runDate,
           triggerSource: TriggerSource.SCHEDULER
         });
 

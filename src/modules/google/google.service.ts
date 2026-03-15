@@ -961,13 +961,20 @@ export async function listGoogleAdsAccounts(filters: AccountFilters = {}) {
       take,
       orderBy: [{ isInMcc: 'desc' }, { updatedAt: 'desc' }],
       include: {
-        sheetConfig: true
+        sheetConfigs: {
+          orderBy: {
+            updatedAt: 'desc'
+          }
+        }
       }
     })
   ]);
 
   return {
-    items,
+    items: items.map((item) => ({
+      ...item,
+      sheetConfig: item.sheetConfigs[0] ?? null
+    })),
     meta: {
       total,
       take,
@@ -980,7 +987,11 @@ export async function getGoogleAdsAccountById(accountId: string) {
   const account = await prisma.adsAccount.findUnique({
     where: { id: accountId },
     include: {
-      sheetConfig: true
+      sheetConfigs: {
+        orderBy: {
+          updatedAt: 'desc'
+        }
+      }
     }
   });
 
@@ -988,7 +999,10 @@ export async function getGoogleAdsAccountById(accountId: string) {
     throw new ApiError(404, 'Google Ads account not found.');
   }
 
-  return account;
+  return {
+    ...account,
+    sheetConfig: account.sheetConfigs[0] ?? null
+  };
 }
 
 export async function updateGoogleAdsAccount(accountId: string, payload: { ingestionEnabled?: boolean }) {
@@ -1011,9 +1025,16 @@ export async function updateGoogleAdsAccount(accountId: string, payload: { inges
       ingestionEnabled: payload.ingestionEnabled
     },
     include: {
-      sheetConfig: true
+      sheetConfigs: {
+        orderBy: {
+          updatedAt: 'desc'
+        }
+      }
     }
-  });
+  }).then((updated) => ({
+    ...updated,
+    sheetConfig: updated.sheetConfigs[0] ?? null
+  }));
 }
 
 export function parseScopesCsv(scopesCsv: string | null | undefined): string[] {

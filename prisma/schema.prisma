@@ -138,7 +138,7 @@ model AdsAccount {
   connection      GoogleOAuthConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   facts           CampaignDailyFact[]
   ingestionRuns   IngestionAccountRun[]
-  sheetConfig     AccountSheetConfig?
+  sheetConfigs    AccountSheetConfig[]
   manualSheetRangeRuns SheetManualRangeRun[]
 
   @@index([isInMcc, ingestionEnabled, googleStatus])
@@ -223,7 +223,7 @@ model CampaignDailyFact {
 
 model AccountSheetConfig {
   id                  String         @id @default(cuid())
-  adsAccountId        String         @unique
+  adsAccountId        String
   spreadsheetId       String
   sheetName           String
   writeMode           SheetWriteMode @default(UPSERT)
@@ -240,6 +240,7 @@ model AccountSheetConfig {
   rowStates  SheetRowState[]
 
   @@index([active, createdAt])
+  @@index([adsAccountId, updatedAt])
 }
 
 model SheetExportRun {

@@ -19,6 +19,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const SHEETS_BASE_URL = 'https://sheets.googleapis.com/v4/spreadsheets';
 const SHEET_EXPORT_START_LOCK_PREFIX = 'sheet-export-start';
+const MAX_SHEET_CONFIGS_PER_ACCOUNT = 25;
 
 const EXPORT_COLUMN_KEYS = [
   'date',
@@ -1028,6 +1029,20 @@ function resolveSelectedColumns(config: {
   return normalizeSelectedColumns(parseCsvList(config.selectedColumnsCsv), SheetColumnMode.MANUAL);
 }
 
+function mapSheetExportConfig<T extends {
+  selectedColumnsCsv: string;
+  campaignStatusesCsv: string;
+}>(config: T): T & {
+  selectedColumns: string[];
+  campaignStatuses: string[];
+} {
+  return {
+    ...config,
+    selectedColumns: parseCsvList(config.selectedColumnsCsv),
+    campaignStatuses: parseCsvList(config.campaignStatusesCsv)
+  };
+}
+
 export async function getSheetExportColumnsCatalog() {
   return {
     availableColumns: Array.from(EXPORT_COLUMN_KEYS)
@@ -1066,16 +1081,14 @@ export async function listSheetExportConfigs(filters: {
   });
 
   return {
-    items: items.map((item) => ({
-      ...item,
-      selectedColumns: parseCsvList(item.selectedColumnsCsv),
-      campaignStatuses: parseCsvList(item.campaignStatusesCsv)
-    }))
+    items: items.map((item) => mapSheetExportConfig(item))
   };
 }
 
 export async function upsertSheetExportConfig(params: {
   adsAccountId: string;
+  configId?: string;
+  createNew?: boolean;
   spreadsheetId: string;
   sheetName: string;
   writeMode?: SheetWriteMode;
@@ -1087,6 +1100,8 @@ export async function upsertSheetExportConfig(params: {
 }) {
   await ensureAccountExportable(params.adsAccountId);
 
+  const normalizedSpreadsheetId = normalizeSpreadsheetId(params.spreadsheetId);
+  const normalizedSheetName = normalizeSheetName(params.sheetName);
   const columnMode = params.columnMode ?? SheetColumnMode.ALL;
   const selectedColumns =
     columnMode === SheetColumnMode.ALL
@@ -1095,51 +1110,121 @@ export async function upsertSheetExportConfig(params: {
 
   const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
 
-  const config = await prisma.accountSheetConfig.upsert({
+  const include = {
+    adsAccount: {
+      select: {
+        id: true,
+        customerId: true,
+        descriptiveName: true,
+        isInMcc: true,
+        isManager: true,
+        googleStatus: true,
+        ingestionEnabled: true
+      }
+    }
+  } satisfies Prisma.AccountSheetConfigInclude;
+
+  const updateData: Prisma.AccountSheetConfigUpdateInput = {
+    spreadsheetId: normalizedSpreadsheetId,
+    sheetName: normalizedSheetName,
+    writeMode: params.writeMode,
+    dataMode: params.dataMode,
+    columnMode,
+    selectedColumnsCsv: toCsvList(selectedColumns),
+    campaignStatusesCsv: toCsvList(campaignStatuses),
+    active: params.active
+  };
+
+  const createData: Prisma.AccountSheetConfigCreateInput = {
+    adsAccount: {
+      connect: {
+        id: params.adsAccountId
+      }
+    },
+    spreadsheetId: normalizedSpreadsheetId,
+    sheetName: normalizedSheetName,
+    writeMode: params.writeMode ?? SheetWriteMode.UPSERT,
+    dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
+    columnMode,
+    selectedColumnsCsv: toCsvList(selectedColumns),
+    campaignStatusesCsv: toCsvList(campaignStatuses),
+    active: params.active ?? true
+  };
+
+  if (params.configId) {
+    const existing = await prisma.accountSheetConfig.findUnique({
+      where: {
+        id: params.configId
+      },
+      select: {
+        id: true,
+        adsAccountId: true
+      }
+    });
+
+    if (!existing) {
+      throw new ApiError(404, 'Sheet export config not found.');
+    }
+
+    if (existing.adsAccountId !== params.adsAccountId) {
+      throw new ApiError(409, 'Sheet export config does not belong to this account.');
+    }
+
+    const updated = await prisma.accountSheetConfig.update({
+      where: {
+        id: existing.id
+      },
+      data: updateData,
+      include
+    });
+
+    return mapSheetExportConfig(updated);
+  }
+
+  if (!params.createNew) {
+    const latestExisting = await prisma.accountSheetConfig.findFirst({
+      where: {
+        adsAccountId: params.adsAccountId
+      },
+      orderBy: {
+        updatedAt: 'desc'
+      },
+      select: {
+        id: true
+      }
+    });
+
+    if (latestExisting) {
+      const updated = await prisma.accountSheetConfig.update({
+        where: {
+          id: latestExisting.id
+        },
+        data: updateData,
+        include
+      });
+
+      return mapSheetExportConfig(updated);
+    }
+  }
+
+  const existingCount = await prisma.accountSheetConfig.count({
     where: {
       adsAccountId: params.adsAccountId
-    },
-    create: {
-      adsAccountId: params.adsAccountId,
-      spreadsheetId: normalizeSpreadsheetId(params.spreadsheetId),
-      sheetName: normalizeSheetName(params.sheetName),
-      writeMode: params.writeMode ?? SheetWriteMode.UPSERT,
-      dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
-      columnMode,
-      selectedColumnsCsv: toCsvList(selectedColumns),
-      campaignStatusesCsv: toCsvList(campaignStatuses),
-      active: params.active ?? true
-    },
-    update: {
-      spreadsheetId: normalizeSpreadsheetId(params.spreadsheetId),
-      sheetName: normalizeSheetName(params.sheetName),
-      writeMode: params.writeMode,
-      dataMode: params.dataMode,
-      columnMode,
-      selectedColumnsCsv: toCsvList(selectedColumns),
-      campaignStatusesCsv: toCsvList(campaignStatuses),
-      active: params.active
-    },
-    include: {
-      adsAccount: {
-        select: {
-          id: true,
-          customerId: true,
-          descriptiveName: true,
-          isInMcc: true,
-          isManager: true,
-          googleStatus: true,
-          ingestionEnabled: true
-        }
-      }
     }
   });
 
-  return {
-    ...config,
-    selectedColumns: parseCsvList(config.selectedColumnsCsv),
-    campaignStatuses: parseCsvList(config.campaignStatusesCsv)
-  };
+  if (existingCount >= MAX_SHEET_CONFIGS_PER_ACCOUNT) {
+    throw new ApiError(400, `Too many sheet configs for account (max ${MAX_SHEET_CONFIGS_PER_ACCOUNT}).`);
+  }
+
+  const created = await prisma.accountSheetConfig.create({
+    data: createData,
+    include: {
+      adsAccount: include.adsAccount
+    }
+  });
+
+  return mapSheetExportConfig(created);
 }
 
 export async function deleteSheetExportConfig(configId: string) {
@@ -1222,7 +1307,7 @@ async function createSheetExportRunWithStartLock(params: {
   });
 }
 
-async function runSheetExportConfig(params: {
+export async function runSheetExportConfigById(params: {
   configId: string;
   runDate: Date;
   triggerSource: TriggerSource;
@@ -1400,7 +1485,7 @@ export async function runSheetExports(params: {
 
   for (const config of configs) {
     try {
-      const outcome = await runSheetExportConfig({
+      const outcome = await runSheetExportConfigById({
         configId: config.id,
         runDate,
         triggerSource: params.triggerSource ?? TriggerSource.MANUAL
