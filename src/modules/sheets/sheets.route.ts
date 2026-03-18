@@ -114,7 +114,7 @@ sheetsRouter.get(
   asyncHandler(async (_req, res) => {
     res.status(200).json({
       enums: {
-        writeModes: Object.values(SheetWriteMode),
+        writeModes: [SheetWriteMode.UPSERT],
         dataModes: Object.values(SheetDataMode),
         columnModes: Object.values(SheetColumnMode),
         runStatuses: Object.values(SheetRunStatus),

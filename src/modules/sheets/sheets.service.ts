@@ -44,9 +44,21 @@ const EXPORT_COLUMN_KEYS = [
   'utm_content'
 ] as const;
 
+const UPSERT_ROW_KEY_COLUMNS = ['date', 'customer_id', 'campaign_id'] as const;
+const NUMERIC_EXPORT_COLUMNS = new Set<SheetExportColumnKey>([
+  'impressions',
+  'clicks',
+  'ctr_percent',
+  'average_cpc',
+  'cost',
+  'conversions',
+  'cost_per_conversion'
+]);
+
 export type SheetExportColumnKey = (typeof EXPORT_COLUMN_KEYS)[number];
 
 export const SHEET_EXPORT_AVAILABLE_COLUMNS = Array.from(EXPORT_COLUMN_KEYS);
+export const REQUIRED_UPSERT_EXPORT_COLUMNS = Array.from(UPSERT_ROW_KEY_COLUMNS);
 
 type FactWithAccount = Prisma.CampaignDailyFactGetPayload<{
   include: {
@@ -81,8 +93,10 @@ type SpreadsheetMetadataResponse = {
   }>;
 };
 
+type SheetCellValue = string | number | boolean | null;
+
 type SheetGetValuesResponse = {
-  values?: string[][];
+  values?: SheetCellValue[][];
 };
 
 type SheetAppendResponse = {
@@ -271,6 +285,48 @@ function normalizeCampaignStatuses(input: string[] | undefined): string[] {
   return Array.from(unique);
 }
 
+function resolveForcedWriteMode(_value?: SheetWriteMode | null): SheetWriteMode {
+  return SheetWriteMode.UPSERT;
+}
+
+function ensureRequiredUpsertColumns(selectedColumns: SheetExportColumnKey[]): SheetExportColumnKey[] {
+  const result: SheetExportColumnKey[] = [];
+  const seen = new Set<string>();
+
+  for (const column of REQUIRED_UPSERT_EXPORT_COLUMNS) {
+    if (!seen.has(column)) {
+      result.push(column);
+      seen.add(column);
+    }
+  }
+
+  for (const column of selectedColumns) {
+    if (!seen.has(column)) {
+      result.push(column);
+      seen.add(column);
+    }
+  }
+
+  return result;
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((value, index) => value === right[index]);
+}
+
+function areStringSetsEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
 function toColumnLetters(columnNumber: number): string {
   if (!Number.isInteger(columnNumber) || columnNumber <= 0) {
     throw new ApiError(500, 'Invalid sheet column number.');
@@ -320,6 +376,52 @@ function normalizeOptionalText(value: string | null | undefined): string {
 
 function pickRowValues(map: RowValueMap, selectedColumns: SheetExportColumnKey[]): Array<string | number> {
   return selectedColumns.map((column) => map[column]);
+}
+
+function hasUpsertRowKeyColumns(headers: SheetExportColumnKey[]): boolean {
+  return UPSERT_ROW_KEY_COLUMNS.every((column) => headers.includes(column));
+}
+
+function normalizeSheetCellValue(raw: SheetCellValue | undefined, column: SheetExportColumnKey): string | number {
+  if (raw === null || raw === undefined) {
+    return '';
+  }
+
+  if (typeof raw === 'number') {
+    return NUMERIC_EXPORT_COLUMNS.has(column) ? roundMetric(raw) : String(raw);
+  }
+
+  if (typeof raw === 'boolean') {
+    return raw ? 'TRUE' : 'FALSE';
+  }
+
+  const normalized = normalizeOptionalText(raw);
+  if (!NUMERIC_EXPORT_COLUMNS.has(column) || normalized.length === 0) {
+    return normalized;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? roundMetric(parsed) : normalized;
+}
+
+function buildRowKeyFromValues(values: Array<string | number>, headers: SheetExportColumnKey[]): string | null {
+  if (!hasUpsertRowKeyColumns(headers)) {
+    return null;
+  }
+
+  const dateIndex = headers.indexOf('date');
+  const customerIdIndex = headers.indexOf('customer_id');
+  const campaignIdIndex = headers.indexOf('campaign_id');
+
+  const dateValue = normalizeOptionalText(String(values[dateIndex] ?? ''));
+  const customerIdValue = normalizeOptionalText(String(values[customerIdIndex] ?? ''));
+  const campaignIdValue = normalizeOptionalText(String(values[campaignIdIndex] ?? ''));
+
+  if (!dateValue || !customerIdValue || !campaignIdValue) {
+    return null;
+  }
+
+  return `${dateValue}|${customerIdValue}|${campaignIdValue}`;
 }
 
 function parseAppendedRowIndex(updatedRange?: string): number | null {
@@ -457,16 +559,16 @@ async function ensureSheetTabExists(params: {
   await createSheetIfMissing(params);
 }
 
-async function fetchHeaderRow(params: {
+async function fetchSheetValues(params: {
   spreadsheetId: string;
-  sheetName: string;
+  range: string;
   accessToken: string;
-  headers: SheetExportColumnKey[];
-}): Promise<string[]> {
-  const range = toA1Range(params.sheetName, 'A1', `${toColumnLetters(params.headers.length)}1`);
+  valueRenderOption?: 'FORMATTED_VALUE' | 'UNFORMATTED_VALUE';
+}): Promise<SheetCellValue[][]> {
+  const suffix = params.valueRenderOption ? `?valueRenderOption=${params.valueRenderOption}` : '';
 
   const response = await withSheetsRetries(() =>
-    axios.get<SheetGetValuesResponse>(toSheetsUrl(params.spreadsheetId, range), {
+    axios.get<SheetGetValuesResponse>(toSheetsUrl(params.spreadsheetId, params.range, suffix), {
       headers: {
         Authorization: `Bearer ${params.accessToken}`
       },
@@ -474,7 +576,23 @@ async function fetchHeaderRow(params: {
     })
   );
 
-  return response.data.values?.[0] ?? [];
+  return response.data.values ?? [];
+}
+
+async function fetchHeaderRow(params: {
+  spreadsheetId: string;
+  sheetName: string;
+  accessToken: string;
+  headers: SheetExportColumnKey[];
+}): Promise<string[]> {
+  const range = toA1Range(params.sheetName, 'A1', `${toColumnLetters(params.headers.length)}1`);
+  const values = await fetchSheetValues({
+    spreadsheetId: params.spreadsheetId,
+    range,
+    accessToken: params.accessToken
+  });
+
+  return (values[0] ?? []).map((cell) => normalizeOptionalText(cell === null || cell === undefined ? '' : String(cell)));
 }
 
 async function updateRangeValues(params: {
@@ -580,6 +698,54 @@ async function ensureHeader(params: {
     values: [Array.from(params.headers)],
     accessToken: params.accessToken
   });
+}
+
+async function loadExistingSheetRowsForUpsert(params: {
+  spreadsheetId: string;
+  sheetName: string;
+  accessToken: string;
+  headers: SheetExportColumnKey[];
+}): Promise<Map<string, { rowHash: string; rowIndex: number }>> {
+  if (!hasUpsertRowKeyColumns(params.headers)) {
+    return new Map();
+  }
+
+  const range = toA1Range(params.sheetName, 'A1', `${toColumnLetters(params.headers.length)}1000000`);
+  const values = await fetchSheetValues({
+    spreadsheetId: params.spreadsheetId,
+    range,
+    accessToken: params.accessToken,
+    valueRenderOption: 'UNFORMATTED_VALUE'
+  });
+
+  if (values.length <= 1) {
+    return new Map();
+  }
+
+  const headerRow = (values[0] ?? []).map((cell) => normalizeOptionalText(cell === null || cell === undefined ? '' : String(cell)));
+  const isCompatibleHeader = params.headers.every((header, index) => headerRow[index] === header);
+  if (!isCompatibleHeader) {
+    return new Map();
+  }
+
+  const rowsByKey = new Map<string, { rowHash: string; rowIndex: number }>();
+
+  for (let index = 1; index < values.length; index += 1) {
+    const normalizedValues = params.headers.map((header, columnIndex) =>
+      normalizeSheetCellValue(values[index]?.[columnIndex], header)
+    );
+    const rowKey = buildRowKeyFromValues(normalizedValues, params.headers);
+    if (!rowKey) {
+      continue;
+    }
+
+    rowsByKey.set(rowKey, {
+      rowHash: hashRow(normalizedValues),
+      rowIndex: index + 1
+    });
+  }
+
+  return rowsByKey;
 }
 
 function summarizeText(values: Array<string | null | undefined>): string {
@@ -841,8 +1007,11 @@ async function runAppendOrUpsertMode(params: {
   });
 
   const useRowState = params.persistRowState !== false;
+  const canBootstrapUpsertFromSheet = params.writeMode === SheetWriteMode.UPSERT && hasUpsertRowKeyColumns(params.headers);
   const effectiveWriteMode =
-    useRowState || params.writeMode !== SheetWriteMode.UPSERT ? params.writeMode : SheetWriteMode.APPEND;
+    params.writeMode === SheetWriteMode.UPSERT && !useRowState && !canBootstrapUpsertFromSheet
+      ? SheetWriteMode.APPEND
+      : params.writeMode;
 
   const existingStates = useRowState
     ? await prisma.sheetRowState.findMany({
@@ -860,7 +1029,76 @@ async function runAppendOrUpsertMode(params: {
       })
     : [];
 
-  const stateByKey = new Map(existingStates.map((item) => [item.rowKey, item]));
+  const stateByKey = new Map<string, { rowHash: string; rowIndex: number | null }>(
+    existingStates.map((item) => [
+      item.rowKey,
+      {
+        rowHash: item.rowHash,
+        rowIndex: item.rowIndex
+      }
+    ])
+  );
+
+  if (params.writeMode === SheetWriteMode.UPSERT) {
+    const missingRowKeys = params.rows.filter((row) => !stateByKey.has(row.rowKey)).map((row) => row.rowKey);
+    const hasPersistedState =
+      useRowState && missingRowKeys.length > 0
+        ? await prisma.sheetRowState.findFirst({
+            where: {
+              configId: params.configId
+            },
+            select: {
+              id: true
+            }
+          })
+        : null;
+
+    if (missingRowKeys.length > 0 && canBootstrapUpsertFromSheet && (!useRowState || !hasPersistedState)) {
+      const existingSheetRows = await loadExistingSheetRowsForUpsert({
+        spreadsheetId: params.spreadsheetId,
+        sheetName: params.sheetName,
+        accessToken: params.accessToken,
+        headers: params.headers
+      });
+
+      const discoveredStates: Array<{
+        configId: string;
+        rowKey: string;
+        rowHash: string;
+        rowIndex: number;
+        lastRunId: string;
+        lastExportedAt: Date;
+      }> = [];
+      const discoveredAt = new Date();
+
+      for (const rowKey of missingRowKeys) {
+        const existing = existingSheetRows.get(rowKey);
+        if (!existing) {
+          continue;
+        }
+
+        stateByKey.set(rowKey, existing);
+
+        if (useRowState) {
+          discoveredStates.push({
+            configId: params.configId,
+            rowKey,
+            rowHash: existing.rowHash,
+            rowIndex: existing.rowIndex,
+            lastRunId: params.runId,
+            lastExportedAt: discoveredAt
+          });
+        }
+      }
+
+      if (discoveredStates.length > 0) {
+        await prisma.sheetRowState.createMany({
+          data: discoveredStates,
+          skipDuplicates: true
+        });
+      }
+    }
+  }
 
   let rowsWritten = 0;
   let rowsSkipped = 0;
@@ -1026,19 +1264,26 @@ function resolveSelectedColumns(config: {
     return Array.from(EXPORT_COLUMN_KEYS);
   }
 
-  return normalizeSelectedColumns(parseCsvList(config.selectedColumnsCsv), SheetColumnMode.MANUAL);
+  return ensureRequiredUpsertColumns(normalizeSelectedColumns(parseCsvList(config.selectedColumnsCsv), SheetColumnMode.MANUAL));
 }
 
 function mapSheetExportConfig<T extends {
   selectedColumnsCsv: string;
   campaignStatusesCsv: string;
-}>(config: T): T & {
+  writeMode?: SheetWriteMode | null;
+  columnMode?: SheetColumnMode | null;
+}>(config: T): Omit<T, 'writeMode'> & {
+  writeMode: SheetWriteMode;
   selectedColumns: string[];
   campaignStatuses: string[];
 } {
+  const selectedColumns = parseCsvList(config.selectedColumnsCsv);
+
   return {
     ...config,
-    selectedColumns: parseCsvList(config.selectedColumnsCsv),
+    writeMode: resolveForcedWriteMode(config.writeMode),
+    selectedColumns:
+      config.columnMode === SheetColumnMode.MANUAL ? ensureRequiredUpsertColumns(selectedColumns as SheetExportColumnKey[]) : selectedColumns,
     campaignStatuses: parseCsvList(config.campaignStatusesCsv)
   };
 }
@@ -1106,7 +1351,7 @@ export async function upsertSheetExportConfig(params: {
   const selectedColumns =
     columnMode === SheetColumnMode.ALL
       ? []
-      : normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL);
+      : ensureRequiredUpsertColumns(normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL));
 
   const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
 
@@ -1127,7 +1372,7 @@ export async function upsertSheetExportConfig(params: {
   const updateData: Prisma.AccountSheetConfigUpdateInput = {
     spreadsheetId: normalizedSpreadsheetId,
     sheetName: normalizedSheetName,
-    writeMode: params.writeMode,
+    writeMode: resolveForcedWriteMode(params.writeMode),
     dataMode: params.dataMode,
     columnMode,
     selectedColumnsCsv: toCsvList(selectedColumns),
@@ -1143,7 +1388,7 @@ export async function upsertSheetExportConfig(params: {
     },
     spreadsheetId: normalizedSpreadsheetId,
     sheetName: normalizedSheetName,
-    writeMode: params.writeMode ?? SheetWriteMode.UPSERT,
+    writeMode: resolveForcedWriteMode(params.writeMode),
     dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
     columnMode,
     selectedColumnsCsv: toCsvList(selectedColumns),
@@ -1158,7 +1403,9 @@ export async function upsertSheetExportConfig(params: {
       },
       select: {
         id: true,
-        adsAccountId: true
+        adsAccountId: true,
+        spreadsheetId: true,
+        sheetName: true
       }
     });
 
@@ -1170,12 +1417,25 @@ export async function upsertSheetExportConfig(params: {
       throw new ApiError(409, 'Sheet export config does not belong to this account.');
     }
 
-    const updated = await prisma.accountSheetConfig.update({
-      where: {
-        id: existing.id
-      },
-      data: updateData,
-      include
+    const destinationChanged =
+      existing.spreadsheetId !== normalizedSpreadsheetId || existing.sheetName !== normalizedSheetName;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (destinationChanged) {
+        await tx.sheetRowState.deleteMany({
+          where: {
+            configId: existing.id
+          }
+        });
+      }
+
+      return tx.accountSheetConfig.update({
+        where: {
+          id: existing.id
+        },
+        data: updateData,
+        include
+      });
     });
 
     return mapSheetExportConfig(updated);
@@ -1190,17 +1450,32 @@ export async function upsertSheetExportConfig(params: {
         updatedAt: 'desc'
       },
       select: {
-        id: true
+        id: true,
+        spreadsheetId: true,
+        sheetName: true
       }
     });
 
     if (latestExisting) {
-      const updated = await prisma.accountSheetConfig.update({
-        where: {
-          id: latestExisting.id
-        },
-        data: updateData,
-        include
+      const destinationChanged =
+        latestExisting.spreadsheetId !== normalizedSpreadsheetId || latestExisting.sheetName !== normalizedSheetName;
+
+      const updated = await prisma.$transaction(async (tx) => {
+        if (destinationChanged) {
+          await tx.sheetRowState.deleteMany({
+            where: {
+              configId: latestExisting.id
+            }
+          });
+        }
+
+        return tx.accountSheetConfig.update({
+          where: {
+            id: latestExisting.id
+          },
+          data: updateData,
+          include
+        });
       });
 
       return mapSheetExportConfig(updated);
@@ -1225,6 +1500,51 @@ export async function upsertSheetExportConfig(params: {
   });
 
   return mapSheetExportConfig(created);
+}
+
+async function findMatchingConfigForManualExport(params: {
+  accountId: string;
+  spreadsheetId: string;
+  sheetName: string;
+  dataMode: SheetDataMode;
+  columnMode: SheetColumnMode;
+  selectedColumns: SheetExportColumnKey[];
+  campaignStatuses: string[];
+}): Promise<string | null> {
+  const configs = await prisma.accountSheetConfig.findMany({
+    where: {
+      adsAccountId: params.accountId,
+      spreadsheetId: params.spreadsheetId,
+      sheetName: params.sheetName,
+      dataMode: params.dataMode,
+      columnMode: params.columnMode
+    },
+    select: {
+      id: true,
+      selectedColumnsCsv: true,
+      campaignStatusesCsv: true
+    },
+    orderBy: {
+      updatedAt: 'desc'
+    }
+  });
+
+  const matched = configs.find((config) => {
+    const configSelectedColumns =
+      params.columnMode === SheetColumnMode.ALL
+        ? Array.from(EXPORT_COLUMN_KEYS)
+        : ensureRequiredUpsertColumns(
+            normalizeSelectedColumns(parseCsvList(config.selectedColumnsCsv), SheetColumnMode.MANUAL)
+          );
+    const configCampaignStatuses = normalizeCampaignStatuses(parseCsvList(config.campaignStatusesCsv));
+
+    return (
+      areStringArraysEqual(configSelectedColumns, params.selectedColumns) &&
+      areStringSetsEqual(configCampaignStatuses, params.campaignStatuses)
+    );
+  });
+
+  return matched?.id ?? null;
 }
 
 export async function deleteSheetExportConfig(configId: string) {
@@ -1357,9 +1677,10 @@ export async function runSheetExportConfigById(params: {
     });
 
     const rowsPrepared = prepared.rows.length;
+    const effectiveWriteMode = resolveForcedWriteMode(config.writeMode);
 
     const result =
-      config.writeMode === SheetWriteMode.OVERWRITE
+      effectiveWriteMode === SheetWriteMode.OVERWRITE
         ? await runOverwriteMode({
             runId: run.id,
             configId: config.id,
@@ -1378,7 +1699,7 @@ export async function runSheetExportConfigById(params: {
             accessToken: oauth.accessToken,
             headers: prepared.selectedColumns,
             rows: prepared.rows,
-            writeMode: config.writeMode,
+            writeMode: effectiveWriteMode,
             progressRunId: run.id
           });
 
@@ -1537,7 +1858,7 @@ async function runManualSheetExportForDateInternal(params: {
   const selectedColumns =
     params.columnMode === SheetColumnMode.ALL
       ? Array.from(EXPORT_COLUMN_KEYS)
-      : normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL);
+      : ensureRequiredUpsertColumns(normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL));
   const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
 
   const oauth = await getGoogleOAuthRuntimeToken();
@@ -1551,31 +1872,47 @@ async function runManualSheetExportForDateInternal(params: {
     selectedColumns
   });
 
+  const matchingConfigId =
+    params.writeMode === SheetWriteMode.APPEND
+      ? null
+      : await findMatchingConfigForManualExport({
+          accountId: params.accountId,
+          spreadsheetId: normalizedSpreadsheetId,
+          sheetName: normalizedSheetName,
+          dataMode: params.dataMode,
+          columnMode: params.columnMode,
+          selectedColumns: prepared.selectedColumns,
+          campaignStatuses
+        });
+
   const runId = `MANUAL-${params.accountId}-${toDateOnlyString(params.runDate)}-${Date.now()}`;
-  const effectiveWriteMode = params.writeMode === SheetWriteMode.UPSERT ? SheetWriteMode.APPEND : params.writeMode;
+  const effectiveWriteMode =
+    params.writeMode === SheetWriteMode.UPSERT && !hasUpsertRowKeyColumns(prepared.selectedColumns)
+      ? SheetWriteMode.APPEND
+      : params.writeMode;
 
   const result =
     params.writeMode === SheetWriteMode.OVERWRITE
       ? await runOverwriteMode({
           runId,
-          configId: `MANUAL-${params.accountId}`,
+          configId: matchingConfigId ?? `MANUAL-${params.accountId}`,
           spreadsheetId: normalizedSpreadsheetId,
           sheetName: normalizedSheetName,
           accessToken: oauth.accessToken,
           headers: prepared.selectedColumns,
           rows: prepared.rows,
-          persistRowState: false
+          persistRowState: matchingConfigId !== null
         })
       : await runAppendOrUpsertMode({
           runId,
-          configId: `MANUAL-${params.accountId}`,
+          configId: matchingConfigId ?? `MANUAL-${params.accountId}`,
           spreadsheetId: normalizedSpreadsheetId,
           sheetName: normalizedSheetName,
           accessToken: oauth.accessToken,
           headers: prepared.selectedColumns,
           rows: prepared.rows,
           writeMode: params.writeMode,
-          persistRowState: false
+          persistRowState: matchingConfigId !== null ? true : false
         });
 
   const status = deriveRunStatus({
@@ -1887,7 +2224,7 @@ export async function startManualSheetExportRange(params: {
   const selectedColumns =
     columnMode === SheetColumnMode.ALL
       ? []
-      : normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL);
+      : ensureRequiredUpsertColumns(normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL));
   const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
 
   const run = await prisma.sheetManualRangeRun.create({
@@ -1895,7 +2232,7 @@ export async function startManualSheetExportRange(params: {
       adsAccountId: params.accountId,
       spreadsheetId: normalizeSpreadsheetId(params.spreadsheetId),
       sheetName: normalizeSheetName(params.sheetName),
-      writeMode: params.writeMode ?? SheetWriteMode.UPSERT,
+      writeMode: resolveForcedWriteMode(params.writeMode),
       dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
       columnMode,
       selectedColumnsCsv: toCsvList(selectedColumns),
@@ -1943,7 +2280,7 @@ export async function runManualSheetExportForDate(params: {
     runDate,
     spreadsheetId: params.spreadsheetId,
     sheetName: params.sheetName,
-    writeMode: params.writeMode ?? SheetWriteMode.UPSERT,
+    writeMode: resolveForcedWriteMode(params.writeMode),
     dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
     columnMode: params.columnMode ?? SheetColumnMode.ALL,
     selectedColumns: params.selectedColumns,

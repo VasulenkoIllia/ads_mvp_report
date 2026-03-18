@@ -293,6 +293,8 @@ const FALLBACK_EXPORT_COLUMNS = [
   'utm_content'
 ] as const;
 
+const REQUIRED_UPSERT_COLUMNS = ['date', 'customer_id', 'campaign_id'] as const;
+
 const COLUMN_LABELS: Record<string, string> = {
   date: 'Дата',
   customer_id: 'Customer ID',
@@ -456,6 +458,35 @@ function normalizeCampaignStatusesInput(value: unknown): string[] {
   return Array.from(new Set(normalizeStringArray(value).map((item) => item.toUpperCase())));
 }
 
+function ensureRequiredUpsertColumns(columns: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+
+  for (const column of REQUIRED_UPSERT_COLUMNS) {
+    if (!seen.has(column)) {
+      result.push(column);
+      seen.add(column);
+    }
+  }
+
+  for (const column of columns) {
+    if (!seen.has(column)) {
+      result.push(column);
+      seen.add(column);
+    }
+  }
+
+  return result;
+}
+
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((value, index) => value === right[index]);
+}
+
 function toDateOnlyInput(value: unknown): string | undefined {
   if (!value) {
     return undefined;
@@ -513,6 +544,7 @@ export function App() {
   const [schedulerForm] = Form.useForm();
   const [configForm] = Form.useForm();
   const sheetFormColumnMode = Form.useWatch('columnMode', sheetRunForm) ?? 'ALL';
+  const configFormColumnMode = Form.useWatch('columnMode', configForm) ?? 'ALL';
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerSaving, setDrawerSaving] = useState(false);
@@ -701,6 +733,34 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [authSession, ingestionRuns, ingestionSubmitting, loadRuns, loadOverview, sheetManualRangeRuns, sheetRunSubmitting]);
 
+  useEffect(() => {
+    if (sheetFormColumnMode !== 'MANUAL') {
+      return;
+    }
+
+    const current = normalizeStringArray(sheetRunForm.getFieldValue('selectedColumns'));
+    const next = ensureRequiredUpsertColumns(current);
+    if (!areStringArraysEqual(current, next)) {
+      sheetRunForm.setFieldsValue({
+        selectedColumns: next
+      });
+    }
+  }, [sheetFormColumnMode, sheetRunForm]);
+
+  useEffect(() => {
+    if (configFormColumnMode !== 'MANUAL') {
+      return;
+    }
+
+    const current = normalizeStringArray(configForm.getFieldValue('selectedColumns'));
+    const next = ensureRequiredUpsertColumns(current);
+    if (!areStringArraysEqual(current, next)) {
+      configForm.setFieldsValue({
+        selectedColumns: next
+      });
+    }
+  }, [configForm, configFormColumnMode]);
+
   const handleLogin = async () => {
     try {
       const result = await request<{ authUrl: string }>('/api/v1/auth/login/start?redirectPath=%2F');
@@ -757,7 +817,10 @@ export function App() {
         writeMode: config?.writeMode ?? 'UPSERT',
         dataMode: config?.dataMode ?? 'CAMPAIGN',
         columnMode: config?.columnMode ?? 'ALL',
-        selectedColumns: config?.selectedColumns ?? [],
+        selectedColumns:
+          config?.columnMode === 'MANUAL'
+            ? ensureRequiredUpsertColumns(config?.selectedColumns ?? [])
+            : config?.selectedColumns ?? [],
         campaignStatuses: config?.campaignStatuses ?? []
       });
     },
@@ -821,7 +884,10 @@ export function App() {
           throw new Error('Для збереження config потрібно заповнити і Spreadsheet ID, і Sheet Name.');
         }
 
-        const selectedColumns = normalizeStringArray(values.selectedColumns);
+        const selectedColumns =
+          values.columnMode === 'MANUAL'
+            ? ensureRequiredUpsertColumns(normalizeStringArray(values.selectedColumns))
+            : normalizeStringArray(values.selectedColumns);
         const campaignStatuses = normalizeCampaignStatusesInput(values.campaignStatuses);
 
         await request(`/api/v1/sheets/configs/${selectedAccount.id}`, {
@@ -831,7 +897,7 @@ export function App() {
             createNew: selectedDrawerConfigId === null,
             spreadsheetId,
             sheetName,
-            writeMode: values.writeMode,
+            writeMode: 'UPSERT',
             dataMode: values.dataMode,
             columnMode: values.columnMode,
             selectedColumns,
@@ -1013,15 +1079,17 @@ export function App() {
     }
 
     const columnMode = values.columnMode === 'MANUAL' ? 'MANUAL' : 'ALL';
-    const selectedColumns = normalizeStringArray(values.selectedColumns);
+    const selectedColumns =
+      columnMode === 'MANUAL'
+        ? ensureRequiredUpsertColumns(normalizeStringArray(values.selectedColumns))
+        : normalizeStringArray(values.selectedColumns);
     const campaignStatuses = normalizeCampaignStatusesInput(values.campaignStatuses);
 
     if (columnMode === 'MANUAL' && selectedColumns.length === 0) {
       throw new Error('У режимі MANUAL потрібно обрати хоча б одне поле.');
     }
 
-    const writeMode: SheetConfigFormPayload['writeMode'] =
-      values.writeMode === 'APPEND' || values.writeMode === 'OVERWRITE' ? values.writeMode : 'UPSERT';
+    const writeMode: SheetConfigFormPayload['writeMode'] = 'UPSERT';
     const dataMode: SheetConfigFormPayload['dataMode'] = values.dataMode === 'DAILY_TOTAL' ? 'DAILY_TOTAL' : 'CAMPAIGN';
 
     return {
@@ -1732,14 +1800,11 @@ export function App() {
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="writeMode" label="Write mode">
-                <Select
-                  options={[
-                    { value: 'UPSERT', label: 'UPSERT' },
-                    { value: 'APPEND', label: 'APPEND' },
-                    { value: 'OVERWRITE', label: 'OVERWRITE' }
-                  ]}
-                />
+              <Form.Item
+                label="Write mode"
+                extra="Режим зафіксований: UPSERT оновлює рядок за ключем date + customer_id + campaign_id і не дає дублювати дані."
+              >
+                <Input value="UPSERT" disabled />
               </Form.Item>
             </Col>
           </Row>
@@ -1777,7 +1842,7 @@ export function App() {
                   label="Поля для вивантаження"
                   extra={
                     isManualMode
-                      ? 'Обери колонки зі списку. Усі ключі приходять з API каталогу.'
+                      ? 'У режимі MANUAL поля date, customer_id, campaign_id додаються автоматично.'
                       : 'У режимі ALL будуть вивантажені всі доступні поля.'
                   }
                   rules={[
@@ -2119,14 +2184,11 @@ export function App() {
 
           <Row gutter={12}>
             <Col xs={24} md={8}>
-              <Form.Item name="writeMode" label="Write mode">
-                <Select
-                  options={[
-                    { value: 'UPSERT', label: 'UPSERT' },
-                    { value: 'APPEND', label: 'APPEND' },
-                    { value: 'OVERWRITE', label: 'OVERWRITE' }
-                  ]}
-                />
+              <Form.Item
+                label="Write mode"
+                extra="Режим зафіксований: UPSERT шукає рядок за date + customer_id + campaign_id. Ці колонки мають залишатися у листі."
+              >
+                <Input value="UPSERT" disabled />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
@@ -2156,7 +2218,11 @@ export function App() {
               <Form.Item
                 name="selectedColumns"
                 label="Поля для вивантаження"
-                extra={sheetFormColumnMode === 'ALL' ? 'У режимі ALL будуть вивантажені всі доступні поля.' : undefined}
+                extra={
+                  sheetFormColumnMode === 'ALL'
+                    ? 'У режимі ALL будуть вивантажені всі доступні поля.'
+                    : 'У режимі MANUAL поля date, customer_id, campaign_id додаються автоматично.'
+                }
               >
                 <Select
                   mode="multiple"
