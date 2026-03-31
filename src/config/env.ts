@@ -71,7 +71,8 @@ const envSchema = z.object({
   SHEETS_RUN_STALE_MINUTES: z.coerce.number().int().min(5).max(1440).default(240),
 
   SCHEDULER_POLL_SECONDS: z.coerce.number().int().min(10).max(300).default(30),
-  SCHEDULER_CATCHUP_DAYS: z.coerce.number().int().min(1).max(14).default(3)
+  SCHEDULER_CATCHUP_DAYS: z.coerce.number().int().min(1).max(14).default(3),
+  SCHEDULER_REFRESH_DAYS: z.coerce.number().int().min(0).max(14).default(2)
 });
 
 const parsed = envSchema.safeParse(process.env);

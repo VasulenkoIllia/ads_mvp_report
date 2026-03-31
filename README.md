@@ -4,7 +4,7 @@ Google Ads -> DB -> Google Sheets сервіс з мінімальним UI дл
 
 1. Авторизація тільки через allowlist Google-акаунтів.
 2. Sync підконтрольних MCC акаунтів.
-3. Ingestion у БД (ручний за період + авто щодня за вчора).
+3. Ingestion у БД (ручний за період + авто щодня за вчора з rolling-refresh останніх днів).
 4. Export у Sheets (авто-конфіг на рівні акаунту + ручний разовий за період).
 
 ## Архітектура MVP
@@ -135,6 +135,8 @@ cp .env.deploy.example .env.deploy
   - `RATE_LIMIT_WRITE_WINDOW_MS`, `RATE_LIMIT_WRITE_MAX`
 - `PRISMA_MIGRATE_ON_START=true` (або `false`, якщо міграції застосовуєш вручну)
 - `SHEETS_MANUAL_MAX_RANGE_DAYS=180`
+- `SCHEDULER_CATCHUP_DAYS=3` (які дні перевіряє scheduler: `-3, -2, -1` від сьогодні)
+- `SCHEDULER_REFRESH_DAYS=2` (щодня перевигружає останні 2 дні для актуалізації конверсій)
 
 2. Запустити:
 

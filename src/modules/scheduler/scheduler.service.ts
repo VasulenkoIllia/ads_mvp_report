@@ -1,12 +1,15 @@
-import { IngestionRunStatus, SheetRunStatus, TriggerSource } from '@prisma/client';
+import { IngestionRunStatus, SheetRunStatus, TriggerSource, type Prisma } from '@prisma/client';
 import { env } from '../../config/env.js';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../lib/http.js';
 import {
+  addDaysToLocalDate,
   getCatchupRunDates,
   getNextScheduledAt,
   getUtcDayWindow,
   hasReachedScheduleTime,
+  localDateTimeToUtc,
+  toLocalDateParts,
   toDateOnlyString
 } from '../../lib/timezone.js';
 import {
@@ -104,6 +107,25 @@ function clampMaxAccounts(value: number | undefined, fallback: number): number {
 function clampMaxConfigsPerTick(value: number | undefined, fallback: number): number {
   const normalized = Math.round(value ?? fallback);
   return Math.min(Math.max(normalized, 1), 2000);
+}
+
+function buildRefreshRunDateSet(now: Date, timezone: string): Set<string> {
+  if (env.SCHEDULER_REFRESH_DAYS <= 0) {
+    return new Set();
+  }
+
+  return new Set(
+    getCatchupRunDates(now, timezone, env.SCHEDULER_REFRESH_DAYS).map((runDate) => toDateOnlyString(runDate))
+  );
+}
+
+function getTodayLocalWindow(now: Date, timezone: string): { start: Date; end: Date } {
+  const localToday = toLocalDateParts(now, timezone);
+  const localTomorrow = addDaysToLocalDate(localToday, 1);
+  return {
+    start: localDateTimeToUtc(localToday, 0, 0, timezone),
+    end: localDateTimeToUtc(localTomorrow, 0, 0, timezone)
+  };
 }
 
 async function getOrCreateSchedulerSettings() {
@@ -260,6 +282,7 @@ export async function getSchedulerHealth() {
     runtime: {
       pollSeconds: env.SCHEDULER_POLL_SECONDS,
       catchupDays: env.SCHEDULER_CATCHUP_DAYS,
+      refreshDays: env.SCHEDULER_REFRESH_DAYS,
       nextIngestionAt: nextIngestionAt.toISOString(),
       nextSheetsAt: nextSheetsAt.toISOString()
     }
@@ -286,34 +309,59 @@ async function runIngestionSchedulerTick(settings: Awaited<ReturnType<typeof get
   }
 
   const runDates = getCatchupRunDates(now, settings.timezone, env.SCHEDULER_CATCHUP_DAYS);
+  const refreshRunDates = buildRefreshRunDateSet(now, settings.timezone);
+  const todayLocalWindow = getTodayLocalWindow(now, settings.timezone);
 
   for (const runDate of runDates) {
     const window = getUtcDayWindow(runDate);
     const runDateText = toDateOnlyString(runDate);
+    const useRefreshPolicy = refreshRunDates.has(runDateText);
+    const schedulerRunsWhere: Prisma.IngestionRunWhereInput = {
+      triggerSource: TriggerSource.SCHEDULER,
+      runDate: {
+        gte: window.start,
+        lt: window.end
+      },
+      ...(useRefreshPolicy
+        ? {
+            startedAt: {
+              gte: todayLocalWindow.start,
+              lt: todayLocalWindow.end
+            }
+          }
+        : {})
+    };
+    const completedAnyPromise = useRefreshPolicy
+      ? prisma.ingestionRun.findFirst({
+          where: {
+            ...schedulerRunsWhere,
+            status: {
+              in: [IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL]
+            }
+          },
+          select: {
+            id: true
+          }
+        })
+      : prisma.ingestionRun.findFirst({
+          where: {
+            runDate: {
+              gte: window.start,
+              lt: window.end
+            },
+            status: {
+              in: [IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL]
+            }
+          },
+          select: {
+            id: true
+          }
+        });
 
     const [completedAny, schedulerRuns] = await Promise.all([
-      prisma.ingestionRun.findFirst({
-        where: {
-          runDate: {
-            gte: window.start,
-            lt: window.end
-          },
-          status: {
-            in: [IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL]
-          }
-        },
-        select: {
-          id: true
-        }
-      }),
+      completedAnyPromise,
       prisma.ingestionRun.findMany({
-        where: {
-          triggerSource: TriggerSource.SCHEDULER,
-          runDate: {
-            gte: window.start,
-            lt: window.end
-          }
-        },
+        where: schedulerRunsWhere,
         orderBy: {
           startedAt: 'desc'
         },
@@ -409,9 +457,12 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
   }
 
   const runDates = getCatchupRunDates(now, settings.timezone, env.SCHEDULER_CATCHUP_DAYS);
+  const refreshRunDates = buildRefreshRunDateSet(now, settings.timezone);
+  const todayLocalWindow = getTodayLocalWindow(now, settings.timezone);
 
   for (const runDate of runDates) {
     const runDateText = toDateOnlyString(runDate);
+    const useRefreshPolicy = refreshRunDates.has(runDateText);
     let launchedAny = false;
 
     for (const config of configs) {
@@ -419,7 +470,15 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
         where: {
           configId: config.id,
           triggerSource: TriggerSource.SCHEDULER,
-          runDate
+          runDate,
+          ...(useRefreshPolicy
+            ? {
+                startedAt: {
+                  gte: todayLocalWindow.start,
+                  lt: todayLocalWindow.end
+                }
+              }
+            : {})
         },
         orderBy: {
           startedAt: 'desc'
@@ -580,7 +639,8 @@ export function startSchedulers(logger?: Partial<SchedulerLogger>) {
   schedulerLogger.info(
     {
       pollSeconds: env.SCHEDULER_POLL_SECONDS,
-      catchupDays: env.SCHEDULER_CATCHUP_DAYS
+      catchupDays: env.SCHEDULER_CATCHUP_DAYS,
+      refreshDays: env.SCHEDULER_REFRESH_DAYS
     },
     'Scheduler started.'
   );
