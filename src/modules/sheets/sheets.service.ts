@@ -35,6 +35,8 @@ const EXPORT_COLUMN_KEYS = [
   'cost',
   'conversions',
   'cost_per_conversion',
+  'conversion_value',
+  'conversion_value_per_cost',
   'final_url_suffix',
   'tracking_url_template',
   'utm_source',
@@ -52,7 +54,9 @@ const NUMERIC_EXPORT_COLUMNS = new Set<SheetExportColumnKey>([
   'average_cpc',
   'cost',
   'conversions',
-  'cost_per_conversion'
+  'cost_per_conversion',
+  'conversion_value',
+  'conversion_value_per_cost'
 ]);
 
 export type SheetExportColumnKey = (typeof EXPORT_COLUMN_KEYS)[number];
@@ -772,17 +776,20 @@ function buildDailyTotalRow(params: {
   let clicks = 0;
   let cost = 0;
   let conversions = 0;
+  let conversionValue = 0;
 
   for (const fact of params.facts) {
     impressions += fact.impressions;
     clicks += fact.clicks;
     cost += fact.cost;
     conversions += fact.conversions;
+    conversionValue += fact.conversionValue;
   }
 
   const ctrPercent = impressions > 0 ? roundMetric((clicks / impressions) * 100) : 0;
   const averageCpc = clicks > 0 ? roundMetric(cost / clicks) : 0;
   const costPerConversion = conversions > 0 ? roundMetric(cost / conversions) : 0;
+  const conversionValuePerCost = cost > 0 ? roundMetric(conversionValue / cost) : 0;
 
   const account = params.facts[0].adsAccount;
 
@@ -800,6 +807,8 @@ function buildDailyTotalRow(params: {
     cost: roundMetric(cost),
     conversions: roundMetric(conversions),
     cost_per_conversion: costPerConversion,
+    conversion_value: roundMetric(conversionValue),
+    conversion_value_per_cost: conversionValuePerCost,
     final_url_suffix: summarizeText(params.facts.map((fact) => fact.finalUrlSuffix)),
     tracking_url_template: summarizeText(params.facts.map((fact) => fact.trackingUrlTemplate)),
     utm_source: summarizeText(params.facts.map((fact) => fact.utmSource)),
@@ -877,6 +886,8 @@ async function prepareRowsForConfig(params: {
       cost: fact.cost,
       conversions: fact.conversions,
       cost_per_conversion: fact.costPerConversion,
+      conversion_value: fact.conversionValue,
+      conversion_value_per_cost: fact.conversionValuePerCost,
       final_url_suffix: normalizeOptionalText(fact.finalUrlSuffix),
       tracking_url_template: normalizeOptionalText(fact.trackingUrlTemplate),
       utm_source: normalizeOptionalText(fact.utmSource),

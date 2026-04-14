@@ -189,30 +189,32 @@ model IngestionAccountRun {
 }
 
 model CampaignDailyFact {
-  id                  String   @id @default(cuid())
-  factDate            DateTime
-  customerId          String
-  campaignId          String
-  campaignName        String
-  campaignStatus      String
-  impressions         Int
-  clicks              Int
-  ctrPercent          Float
-  averageCpc          Float
-  cost                Float
-  conversions         Float
-  costPerConversion   Float
-  finalUrlSuffix      String?
-  trackingUrlTemplate String?
-  utmSource           String?
-  utmMedium           String?
-  utmCampaign         String?
-  utmTerm             String?
-  utmContent          String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-  adsAccountId        String
-  sourceRunId         String?
+  id                     String   @id @default(cuid())
+  factDate               DateTime
+  customerId             String
+  campaignId             String
+  campaignName           String
+  campaignStatus         String
+  impressions            Int
+  clicks                 Int
+  ctrPercent             Float
+  averageCpc             Float
+  cost                   Float
+  conversions            Float
+  costPerConversion      Float
+  conversionValue        Float    @default(0)
+  conversionValuePerCost Float    @default(0)
+  finalUrlSuffix         String?
+  trackingUrlTemplate    String?
+  utmSource              String?
+  utmMedium              String?
+  utmCampaign            String?
+  utmTerm                String?
+  utmContent             String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  adsAccountId           String
+  sourceRunId            String?
 
   adsAccount AdsAccount    @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
   sourceRun  IngestionRun? @relation(fields: [sourceRunId], references: [id], onDelete: SetNull)

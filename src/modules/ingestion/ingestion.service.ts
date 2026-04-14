@@ -51,8 +51,12 @@ type CampaignRow = {
     costMicros?: number | string;
     cost_micros?: number | string;
     conversions?: number | string;
+    conversionsValue?: number | string;
+    conversions_value?: number | string;
     costPerConversion?: number | string;
     cost_per_conversion?: number | string;
+    conversionsValuePerCost?: number | string;
+    conversions_value_per_cost?: number | string;
   };
   metrics_?: {
     impressions?: number | string;
@@ -61,7 +65,9 @@ type CampaignRow = {
     average_cpc?: number | string;
     cost_micros?: number | string;
     conversions?: number | string;
+    conversions_value?: number | string;
     cost_per_conversion?: number | string;
+    conversions_value_per_cost?: number | string;
   };
 };
 
@@ -80,6 +86,8 @@ type IngestionFactRow = {
   cost: number;
   conversions: number;
   costPerConversion: number;
+  conversionValue: number;
+  conversionValuePerCost: number;
   finalUrlSuffix: string | null;
   trackingUrlTemplate: string | null;
   utmSource: string | null;
@@ -365,6 +373,8 @@ function parseCampaignRows(payload: unknown): IngestionFactRow[] {
       const trackingUrlTemplate = normalizeOptionalText(
         item.campaign?.trackingUrlTemplate ?? campaign.tracking_url_template
       );
+      const costRaw = parseNumber(metrics.costMicros ?? metrics.cost_micros) / 1_000_000;
+      const conversionValueRaw = parseNumber(metrics.conversionsValue ?? metrics.conversions_value);
 
       rows.push({
         campaignId,
@@ -380,9 +390,13 @@ function parseCampaignRows(payload: unknown): IngestionFactRow[] {
         clicks: parseInteger(metrics.clicks),
         ctrPercent: normalizeCtrPercent(metrics.ctr),
         averageCpc: microsToCurrency(metrics.averageCpc ?? metrics.average_cpc),
-        cost: microsToCurrency(metrics.costMicros ?? metrics.cost_micros),
+        cost: roundTo(costRaw, 2),
         conversions: roundTo(parseNumber(metrics.conversions), 2),
         costPerConversion: microsToCurrency(metrics.costPerConversion ?? metrics.cost_per_conversion),
+        conversionValue: roundTo(conversionValueRaw, 2),
+        // `metrics.conversions_value_per_cost` can fail for CAMPAIGN in some API combinations.
+        // Keep ingestion stable by deriving the ratio from returned conversion value and cost.
+        conversionValuePerCost: costRaw > 0 ? roundTo(conversionValueRaw / costRaw, 2) : 0,
         finalUrlSuffix,
         trackingUrlTemplate,
         ...mergeUtm(parseUtmTokens(finalUrlSuffix), parseUtmTokens(trackingUrlTemplate))
@@ -534,7 +548,8 @@ async function fetchCampaignMetricsForDate(params: {
   metrics.average_cpc,
   metrics.cost_micros,
   metrics.conversions,
-  metrics.cost_per_conversion
+  metrics.cost_per_conversion,
+  metrics.conversions_value
 FROM campaign
 WHERE segments.date = '${params.runDate}'
   AND campaign.status = '${ACTIVE_CAMPAIGN_STATUS}'`;
@@ -631,6 +646,8 @@ async function processAccountForDate(params: {
             cost: row.cost,
             conversions: row.conversions,
             costPerConversion: row.costPerConversion,
+            conversionValue: row.conversionValue,
+            conversionValuePerCost: row.conversionValuePerCost,
             finalUrlSuffix: row.finalUrlSuffix,
             trackingUrlTemplate: row.trackingUrlTemplate,
             utmSource: row.utmSource,
@@ -654,6 +671,8 @@ async function processAccountForDate(params: {
             cost: row.cost,
             conversions: row.conversions,
             costPerConversion: row.costPerConversion,
+            conversionValue: row.conversionValue,
+            conversionValuePerCost: row.conversionValuePerCost,
             finalUrlSuffix: row.finalUrlSuffix,
             trackingUrlTemplate: row.trackingUrlTemplate,
             utmSource: row.utmSource,
