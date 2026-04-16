@@ -47,6 +47,7 @@ Google Ads -> DB -> Google Sheets сервіс з мінімальним UI дл
 - Захист від race condition при старті ingestion через транзакційний Postgres advisory lock.
 - Stale-run auto-fail для ingestion/sheets базується на `updatedAt` (тобто "нема прогресу"), а не лише на `startedAt`.
 - Для довгих запусків оновлюється heartbeat/progress у БД під час обробки.
+- Для Google Sheets quota `ReadRequestsPerMinutePerUser` додано quota-aware backoff і скорочено зайві read-запити під час export.
 
 ## Локальний запуск
 

@@ -10,6 +10,12 @@ import {
   type Prisma
 } from '@prisma/client';
 import { env } from '../../config/env.js';
+import {
+  formatGoogleSheetsQuotaMessage,
+  GoogleSheetsQuotaExhaustedError,
+  parseGoogleSheetsQuotaExhaustedMeta,
+  resolveGoogleSheetsQuotaRetryDelayMs
+} from '../../lib/google-sheets-quota.js';
 import { ApiError } from '../../lib/http.js';
 import { prisma } from '../../lib/prisma.js';
 import { getDefaultYesterdayRunDate, getUtcDayWindow, parseDateOnlyToUtcDayStart, toDateOnlyString } from '../../lib/timezone.js';
@@ -89,14 +95,6 @@ type PreparedExportRowsPayload = {
   selectedColumns: SheetExportColumnKey[];
 };
 
-type SpreadsheetMetadataResponse = {
-  sheets?: Array<{
-    properties?: {
-      title?: string;
-    };
-  }>;
-};
-
 type SheetCellValue = string | number | boolean | null;
 
 type SheetGetValuesResponse = {
@@ -166,11 +164,18 @@ async function withSheetsRetries<T>(operation: () => Promise<T>): Promise<T> {
       return await operation();
     } catch (error) {
       lastError = error;
+      const quotaMeta = parseGoogleSheetsQuotaExhaustedMeta(error);
       if (attempt === env.GOOGLE_SHEETS_RETRY_ATTEMPTS || !isRetryable(error)) {
+        if (quotaMeta) {
+          throw new GoogleSheetsQuotaExhaustedError(quotaMeta);
+        }
+
         throw error;
       }
 
-      const backoff = env.GOOGLE_SHEETS_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 100);
+      const baseBackoff =
+        env.GOOGLE_SHEETS_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 100);
+      const backoff = quotaMeta ? resolveGoogleSheetsQuotaRetryDelayMs(quotaMeta, baseBackoff) : baseBackoff;
       await sleep(backoff);
     }
   }
@@ -476,23 +481,6 @@ async function ensureAccountExportable(accountId: string) {
   return account;
 }
 
-async function getSheetTitles(params: { spreadsheetId: string; accessToken: string }): Promise<string[]> {
-  const url = `${SHEETS_BASE_URL}/${encodeURIComponent(params.spreadsheetId)}?fields=sheets.properties.title`;
-
-  const response = await withSheetsRetries(() =>
-    axios.get<SpreadsheetMetadataResponse>(url, {
-      headers: {
-        Authorization: `Bearer ${params.accessToken}`
-      },
-      timeout: env.GOOGLE_SHEETS_HTTP_TIMEOUT_MS
-    })
-  );
-
-  return (response.data.sheets ?? [])
-    .map((sheet) => sheet.properties?.title?.trim() ?? '')
-    .filter((title) => title.length > 0);
-}
-
 function isAlreadyExistsSheetError(error: unknown): boolean {
   if (!axios.isAxiosError(error)) {
     return false;
@@ -551,15 +539,7 @@ async function ensureSheetTabExists(params: {
   sheetName: string;
   accessToken: string;
 }): Promise<void> {
-  const titles = await getSheetTitles({
-    spreadsheetId: params.spreadsheetId,
-    accessToken: params.accessToken
-  });
-
-  if (titles.includes(params.sheetName)) {
-    return;
-  }
-
+  // Avoid extra read quota calls; addSheet is idempotent for our flow ("already exists" is swallowed).
   await createSheetIfMissing(params);
 }
 
@@ -581,22 +561,6 @@ async function fetchSheetValues(params: {
   );
 
   return response.data.values ?? [];
-}
-
-async function fetchHeaderRow(params: {
-  spreadsheetId: string;
-  sheetName: string;
-  accessToken: string;
-  headers: SheetExportColumnKey[];
-}): Promise<string[]> {
-  const range = toA1Range(params.sheetName, 'A1', `${toColumnLetters(params.headers.length)}1`);
-  const values = await fetchSheetValues({
-    spreadsheetId: params.spreadsheetId,
-    range,
-    accessToken: params.accessToken
-  });
-
-  return (values[0] ?? []).map((cell) => normalizeOptionalText(cell === null || cell === undefined ? '' : String(cell)));
 }
 
 async function updateRangeValues(params: {
@@ -684,16 +648,7 @@ async function ensureHeader(params: {
   accessToken: string;
   headers: SheetExportColumnKey[];
 }): Promise<void> {
-  const current = await fetchHeaderRow(params);
-
-  const shouldUpdate =
-    current.length < params.headers.length ||
-    params.headers.some((value, index) => (current[index] ?? '').trim() !== value);
-
-  if (!shouldUpdate) {
-    return;
-  }
-
+  // Always set header row explicitly; this removes one read call per export run.
   const range = toA1Range(params.sheetName, 'A1', `${toColumnLetters(params.headers.length)}1`);
 
   await updateRangeValues({
@@ -1050,66 +1005,17 @@ async function runAppendOrUpsertMode(params: {
     ])
   );
 
-  if (params.writeMode === SheetWriteMode.UPSERT) {
-    const missingRowKeys = params.rows.filter((row) => !stateByKey.has(row.rowKey)).map((row) => row.rowKey);
-    const hasPersistedState =
-      useRowState && missingRowKeys.length > 0
-        ? await prisma.sheetRowState.findFirst({
-            where: {
-              configId: params.configId
-            },
-            select: {
-              id: true
-            }
-          })
-        : null;
-
-    if (missingRowKeys.length > 0 && canBootstrapUpsertFromSheet && (!useRowState || !hasPersistedState)) {
-      const existingSheetRows = await loadExistingSheetRowsForUpsert({
-        spreadsheetId: params.spreadsheetId,
-        sheetName: params.sheetName,
-        accessToken: params.accessToken,
-        headers: params.headers
-      });
-
-      const discoveredStates: Array<{
-        configId: string;
-        rowKey: string;
-        rowHash: string;
-        rowIndex: number;
-        lastRunId: string;
-        lastExportedAt: Date;
-      }> = [];
-      const discoveredAt = new Date();
-
-      for (const rowKey of missingRowKeys) {
-        const existing = existingSheetRows.get(rowKey);
-        if (!existing) {
-          continue;
-        }
-
-        stateByKey.set(rowKey, existing);
-
-        if (useRowState) {
-          discoveredStates.push({
-            configId: params.configId,
-            rowKey,
-            rowHash: existing.rowHash,
-            rowIndex: existing.rowIndex,
-            lastRunId: params.runId,
-            lastExportedAt: discoveredAt
-          });
-        }
-      }
-
-      if (discoveredStates.length > 0) {
-        await prisma.sheetRowState.createMany({
-          data: discoveredStates,
-          skipDuplicates: true
-        });
-      }
-    }
-  }
+  // For UPSERT, always use the actual sheet content as the source of truth.
+  // This auto-recovers after manual row moves/deletes and avoids stale rowIndex holes.
+  const sheetRowsByKey =
+    effectiveWriteMode === SheetWriteMode.UPSERT && canBootstrapUpsertFromSheet
+      ? await loadExistingSheetRowsForUpsert({
+          spreadsheetId: params.spreadsheetId,
+          sheetName: params.sheetName,
+          accessToken: params.accessToken,
+          headers: params.headers
+        })
+      : new Map<string, { rowHash: string; rowIndex: number }>();
 
   let rowsWritten = 0;
   let rowsSkipped = 0;
@@ -1145,9 +1051,46 @@ async function runAppendOrUpsertMode(params: {
   };
 
   for (const row of params.rows) {
-    const existing = stateByKey.get(row.rowKey);
+    const persistedState = stateByKey.get(row.rowKey);
+    const existingOnSheet = effectiveWriteMode === SheetWriteMode.UPSERT ? sheetRowsByKey.get(row.rowKey) : null;
 
-    if (useRowState && existing && existing.rowHash === row.rowHash) {
+    const shouldSkip =
+      effectiveWriteMode === SheetWriteMode.UPSERT
+        ? Boolean(existingOnSheet && existingOnSheet.rowHash === row.rowHash)
+        : Boolean(useRowState && persistedState && persistedState.rowHash === row.rowHash);
+
+    if (shouldSkip) {
+      if (
+        useRowState &&
+        existingOnSheet &&
+        (!persistedState ||
+          persistedState.rowHash !== existingOnSheet.rowHash ||
+          persistedState.rowIndex !== existingOnSheet.rowIndex)
+      ) {
+        await prisma.sheetRowState.upsert({
+          where: {
+            configId_rowKey: {
+              configId: params.configId,
+              rowKey: row.rowKey
+            }
+          },
+          update: {
+            rowHash: existingOnSheet.rowHash,
+            rowIndex: existingOnSheet.rowIndex,
+            lastRunId: params.runId,
+            lastExportedAt: new Date()
+          },
+          create: {
+            configId: params.configId,
+            rowKey: row.rowKey,
+            rowHash: existingOnSheet.rowHash,
+            rowIndex: existingOnSheet.rowIndex,
+            lastRunId: params.runId,
+            lastExportedAt: new Date()
+          }
+        });
+      }
+
       rowsSkipped += 1;
       processedRows += 1;
       await flushProgress();
@@ -1157,11 +1100,11 @@ async function runAppendOrUpsertMode(params: {
     try {
       let rowIndex: number | null = null;
 
-      if (effectiveWriteMode === SheetWriteMode.UPSERT && existing?.rowIndex) {
+      if (effectiveWriteMode === SheetWriteMode.UPSERT && existingOnSheet?.rowIndex) {
         const range = toA1Range(
           params.sheetName,
-          `A${existing.rowIndex}`,
-          `${toColumnLetters(params.headers.length)}${existing.rowIndex}`
+          `A${existingOnSheet.rowIndex}`,
+          `${toColumnLetters(params.headers.length)}${existingOnSheet.rowIndex}`
         );
 
         await updateRangeValues({
@@ -1171,7 +1114,7 @@ async function runAppendOrUpsertMode(params: {
           accessToken: params.accessToken
         });
 
-        rowIndex = existing.rowIndex;
+        rowIndex = existingOnSheet.rowIndex;
       } else {
         rowIndex = await appendValues({
           spreadsheetId: params.spreadsheetId,
@@ -1182,6 +1125,8 @@ async function runAppendOrUpsertMode(params: {
       }
 
       if (useRowState) {
+        const persistedRowIndex = rowIndex ?? existingOnSheet?.rowIndex ?? persistedState?.rowIndex ?? null;
+
         await prisma.sheetRowState.upsert({
           where: {
             configId_rowKey: {
@@ -1191,7 +1136,7 @@ async function runAppendOrUpsertMode(params: {
           },
           update: {
             rowHash: row.rowHash,
-            rowIndex: rowIndex ?? existing?.rowIndex ?? null,
+            rowIndex: persistedRowIndex,
             lastRunId: params.runId,
             lastExportedAt: new Date()
           },
@@ -1199,15 +1144,35 @@ async function runAppendOrUpsertMode(params: {
             configId: params.configId,
             rowKey: row.rowKey,
             rowHash: row.rowHash,
-            rowIndex,
+            rowIndex: persistedRowIndex,
             lastRunId: params.runId,
             lastExportedAt: new Date()
           }
+        });
+
+        stateByKey.set(row.rowKey, {
+          rowHash: row.rowHash,
+          rowIndex: persistedRowIndex
+        });
+      }
+
+      if (effectiveWriteMode === SheetWriteMode.UPSERT && rowIndex) {
+        sheetRowsByKey.set(row.rowKey, {
+          rowHash: row.rowHash,
+          rowIndex
         });
       }
 
       rowsWritten += 1;
     } catch (error) {
+      if (error instanceof GoogleSheetsQuotaExhaustedError) {
+        rowsFailed += 1;
+        rowErrors.push(`[${row.rowKey}] ${truncate(formatGoogleSheetsQuotaMessage(error.meta), 460)}`);
+        processedRows += 1;
+        await flushProgress(true);
+        throw error;
+      }
+
       rowsFailed += 1;
       rowErrors.push(`[${row.rowKey}] ${truncate(toErrorMessage(error), 460)}`);
     }
@@ -1757,7 +1722,22 @@ export async function runSheetExportConfigById(params: {
       errors: result.rowErrors
     };
   } catch (error) {
-    const reason = truncate(toErrorMessage(error), 1500);
+    const reason =
+      error instanceof GoogleSheetsQuotaExhaustedError
+        ? truncate(formatGoogleSheetsQuotaMessage(error.meta), 1500)
+        : truncate(toErrorMessage(error), 1500);
+
+    const progress = await prisma.sheetExportRun.findUnique({
+      where: {
+        id: run.id
+      },
+      select: {
+        rowsPrepared: true,
+        rowsWritten: true,
+        rowsSkipped: true,
+        rowsFailed: true
+      }
+    });
 
     await prisma.sheetExportRun.update({
       where: {
@@ -1766,13 +1746,38 @@ export async function runSheetExportConfigById(params: {
       data: {
         status: SheetRunStatus.FAILED,
         finishedAt: new Date(),
-        rowsPrepared: 0,
-        rowsWritten: 0,
-        rowsSkipped: 0,
-        rowsFailed: 0,
+        rowsPrepared: progress?.rowsPrepared ?? 0,
+        rowsWritten: progress?.rowsWritten ?? 0,
+        rowsSkipped: progress?.rowsSkipped ?? 0,
+        rowsFailed: progress?.rowsFailed ?? 0,
         errorSummary: reason
       }
     });
+
+    if (error instanceof GoogleSheetsQuotaExhaustedError) {
+      const retryAfterSeconds =
+        error.meta.retryAfterSeconds ??
+        Math.ceil(
+          resolveGoogleSheetsQuotaRetryDelayMs(error.meta, env.GOOGLE_SHEETS_RETRY_BASE_DELAY_MS) / 1000
+        );
+      const blockedUntil = new Date(Date.now() + retryAfterSeconds * 1000).toISOString();
+
+      throw new ApiError(
+        429,
+        'Google Sheets quota exhausted. Retry later.',
+        {
+          configId: params.configId,
+          runId: run.id,
+          reason,
+          retryAfterSeconds,
+          blockedUntil,
+          quotaMetric: error.meta.quotaMetric,
+          quotaLimit: error.meta.quotaLimit,
+          quotaLimitValue: error.meta.quotaLimitValue
+        },
+        'GOOGLE_SHEETS_QUOTA_EXHAUSTED'
+      );
+    }
 
     throw new ApiError(502, 'Sheet export run failed.', {
       configId: params.configId,
