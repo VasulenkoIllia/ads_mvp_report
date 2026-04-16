@@ -10,6 +10,7 @@ import {
   type Prisma
 } from '@prisma/client';
 import { env } from '../../config/env.js';
+import { isGoogleSheetsAddSheetAlreadyExistsError } from '../../lib/google-sheets-errors.js';
 import {
   formatGoogleSheetsQuotaMessage,
   GoogleSheetsQuotaExhaustedError,
@@ -482,16 +483,7 @@ async function ensureAccountExportable(accountId: string) {
 }
 
 function isAlreadyExistsSheetError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) {
-    return false;
-  }
-
-  const payload =
-    typeof error.response?.data === 'string'
-      ? error.response.data
-      : JSON.stringify(error.response?.data ?? '');
-
-  return payload.toLowerCase().includes('already exists');
+  return axios.isAxiosError(error) && isGoogleSheetsAddSheetAlreadyExistsError(error);
 }
 
 async function createSheetIfMissing(params: {
