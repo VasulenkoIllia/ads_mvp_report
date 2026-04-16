@@ -7,6 +7,13 @@ import {
   type Prisma
 } from '@prisma/client';
 import { env } from '../../config/env.js';
+import {
+  GoogleAdsQuotaExhaustedError,
+  extractGoogleAdsRetryAfterSeconds,
+  formatGoogleAdsQuotaMessage,
+  isGoogleAdsQuotaErrorSource,
+  parseGoogleAdsQuotaExhaustedMeta
+} from '../../lib/google-ads-quota.js';
 import { ApiError } from '../../lib/http.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -126,6 +133,13 @@ type IngestionPreflightResult = {
   canRun: boolean;
   reason: string | null;
   staleRunsAutoFailed: number;
+  quotaCooldown: {
+    active: boolean;
+    sourceRunId: string | null;
+    retryAfterSeconds: number | null;
+    blockedUntil: string | null;
+    remainingSeconds: number | null;
+  };
   oauth: {
     configured: boolean;
     connected: boolean;
@@ -196,6 +210,16 @@ async function withRetries<T>(operation: () => Promise<T>): Promise<T> {
       return await operation();
     } catch (error) {
       lastError = error;
+      const quotaMeta = parseGoogleAdsQuotaExhaustedMeta(error);
+      const isDeveloperScope = quotaMeta?.rateScope?.toUpperCase() === 'DEVELOPER';
+      const hasLongRetryWindow = Boolean(quotaMeta?.retryAfterSeconds && quotaMeta.retryAfterSeconds >= 60);
+
+      // Google Ads can return long retry windows for developer-level quotas.
+      // Fail fast and let scheduler/manual runs retry later instead of hammering API.
+      if (quotaMeta && (isDeveloperScope || hasLongRetryWindow)) {
+        throw new GoogleAdsQuotaExhaustedError(quotaMeta);
+      }
+
       if (attempt === env.GOOGLE_ADS_RETRY_ATTEMPTS || !isRetryable(error)) {
         throw error;
       }
@@ -704,7 +728,10 @@ async function processAccountForDate(params: {
       error: null
     };
   } catch (error) {
-    const message = truncate(toErrorMessage(error), 1000);
+    const message =
+      error instanceof GoogleAdsQuotaExhaustedError
+        ? truncate(formatGoogleAdsQuotaMessage(error.meta), 1000)
+        : truncate(toErrorMessage(error), 1000);
 
     await prisma.ingestionAccountRun.update({
       where: {
@@ -717,6 +744,10 @@ async function processAccountForDate(params: {
         errorSummary: message
       }
     });
+
+    if (error instanceof GoogleAdsQuotaExhaustedError) {
+      throw error;
+    }
 
     return {
       status: IngestionAccountRunStatus.FAILED,
@@ -808,7 +839,7 @@ export async function preflightGoogleAdsIngestion(params: {
 
   const staleRunsAutoFailed = params.autoFailStaleRuns ? await markStaleIngestionRunsAsFailed() : 0;
 
-  const [connection, runningRun, totalEligible] = await Promise.all([
+  const [connection, runningRun, totalEligible, lastFailedRun] = await Promise.all([
     prisma.googleOAuthConnection.findUnique({
       where: {
         id: 'GOOGLE'
@@ -834,10 +865,30 @@ export async function preflightGoogleAdsIngestion(params: {
         startedAt: true
       }
     }),
-    prisma.adsAccount.count({ where })
+    prisma.adsAccount.count({ where }),
+    prisma.ingestionRun.findFirst({
+      where: {
+        status: IngestionRunStatus.FAILED,
+        finishedAt: {
+          not: null
+        },
+        errorSummary: {
+          not: null
+        }
+      },
+      orderBy: {
+        finishedAt: 'desc'
+      },
+      select: {
+        id: true,
+        finishedAt: true,
+        errorSummary: true
+      }
+    })
   ]);
 
   const selectedAccounts = Math.min(totalEligible, requestedAccounts);
+  const nowMs = Date.now();
 
   const configured = Boolean(env.GOOGLE_ADS_DEVELOPER_TOKEN && env.GOOGLE_ADS_MANAGER_CUSTOMER_ID);
   const connected = Boolean(
@@ -847,7 +898,7 @@ export async function preflightGoogleAdsIngestion(params: {
   const tokenDaysLeft =
     connection?.refreshTokenExpiresAt === null || connection?.refreshTokenExpiresAt === undefined
       ? null
-      : Math.ceil((connection.refreshTokenExpiresAt.getTime() - Date.now()) / DAY_MS);
+      : Math.ceil((connection.refreshTokenExpiresAt.getTime() - nowMs) / DAY_MS);
 
   const tokenExpired = tokenDaysLeft !== null && tokenDaysLeft < 0;
   const ready = configured && connected && !tokenExpired;
@@ -859,8 +910,25 @@ export async function preflightGoogleAdsIngestion(params: {
           id: runningRun.id,
           runDate: toDateOnlyString(runningRun.runDate),
           startedAt: runningRun.startedAt.toISOString(),
-          ageMinutes: Math.max(0, Math.floor((Date.now() - runningRun.startedAt.getTime()) / MINUTE_MS))
+          ageMinutes: Math.max(0, Math.floor((nowMs - runningRun.startedAt.getTime()) / MINUTE_MS))
         };
+
+  const retryAfterSeconds =
+    lastFailedRun?.errorSummary && isGoogleAdsQuotaErrorSource(lastFailedRun.errorSummary)
+      ? extractGoogleAdsRetryAfterSeconds(lastFailedRun.errorSummary)
+      : null;
+  const blockedUntilMs =
+    retryAfterSeconds && lastFailedRun?.finishedAt
+      ? lastFailedRun.finishedAt.getTime() + retryAfterSeconds * 1000
+      : null;
+  const remainingSeconds = blockedUntilMs && blockedUntilMs > nowMs ? Math.ceil((blockedUntilMs - nowMs) / 1000) : null;
+  const quotaCooldown = {
+    active: Boolean(remainingSeconds && remainingSeconds > 0),
+    sourceRunId: lastFailedRun?.id ?? null,
+    retryAfterSeconds: retryAfterSeconds ?? null,
+    blockedUntil: blockedUntilMs ? new Date(blockedUntilMs).toISOString() : null,
+    remainingSeconds
+  };
 
   let reason: string | null = null;
 
@@ -868,6 +936,8 @@ export async function preflightGoogleAdsIngestion(params: {
     reason = 'Google OAuth/Google Ads connection is not ready.';
   } else if (runningConflict && !params.skipRunningCheck) {
     reason = `Ingestion run ${runningConflict.id} is still RUNNING.`;
+  } else if (quotaCooldown.active) {
+    reason = `Google Ads quota cooldown is active until ${quotaCooldown.blockedUntil} (retry in ${quotaCooldown.remainingSeconds}s).`;
   } else if (selectedAccounts === 0) {
     reason = 'No eligible Google Ads accounts found for ingestion.';
   }
@@ -877,6 +947,7 @@ export async function preflightGoogleAdsIngestion(params: {
     canRun: reason === null,
     reason,
     staleRunsAutoFailed,
+    quotaCooldown,
     oauth: {
       configured,
       connected,
@@ -1103,7 +1174,10 @@ export async function runGoogleAdsIngestion(params: RunGoogleAdsIngestionParams 
       errors
     };
   } catch (error) {
-    const reason = truncate(toErrorMessage(error), 1500);
+    const reason =
+      error instanceof GoogleAdsQuotaExhaustedError
+        ? truncate(formatGoogleAdsQuotaMessage(error.meta), 1500)
+        : truncate(toErrorMessage(error), 1500);
 
     await prisma.ingestionRun.update({
       where: {
@@ -1120,6 +1194,29 @@ export async function runGoogleAdsIngestion(params: RunGoogleAdsIngestionParams 
         errorSummary: reason
       }
     });
+
+    if (error instanceof GoogleAdsQuotaExhaustedError) {
+      const retryAfterSeconds = error.meta.retryAfterSeconds;
+      const blockedUntil =
+        retryAfterSeconds && retryAfterSeconds > 0
+          ? new Date(Date.now() + retryAfterSeconds * 1000).toISOString()
+          : null;
+
+      throw new ApiError(
+        429,
+        'Google Ads quota exhausted. Retry later.',
+        {
+          runId: createdRun.id,
+          reason,
+          retryAfterSeconds,
+          blockedUntil,
+          requestId: error.meta.requestId,
+          rateScope: error.meta.rateScope,
+          rateName: error.meta.rateName
+        },
+        'GOOGLE_ADS_QUOTA_EXHAUSTED'
+      );
+    }
 
     throw new ApiError(502, 'Ingestion run failed.', {
       runId: createdRun.id,
