@@ -195,6 +195,17 @@ EXPORT_COLUMN_KEYS = [
 - **Behavior:** Only export campaigns with these statuses
 - **Result:** ✓ PASS — REMOVED campaigns excluded
 
+#### 7. SKIPPED Status Test (Upsert Deduplication)
+
+- **Scenario:** Run same export twice with identical data
+- **First Run:** Status SUCCESS, all rows written
+- **Second Run:** Status SKIPPED, no rows updated (all matched by row hash)
+  - `rowsPrepared > 0` (data exists)
+  - All rows already in Sheet with matching content
+  - No writes made (all skipped)
+- **UI Display:** Shows "Актуально" (Up-to-date) ✓
+- **Meaning:** Upsert dedup working correctly; prevents unnecessary API calls
+
 ---
 
 ## API Endpoint Tests
@@ -257,10 +268,10 @@ EXPORT_COLUMN_KEYS = [
 | Page | Components | Status |
 |------|------------|--------|
 | OverviewPage | Status cards, recent runs, alerts | ✓ Works |
-| AccountsPage | Account list, "Дані до" freshness column | ✓ Works |
-| CampaignsPage | Campaign browser, filter by status/name | ✓ Works |
+| AccountsPage | Account list, filters: name/ID, Google status (multi), ingestion toggle, data freshness; reset button | ✓ Works |
+| CampaignsPage | Campaign browser, filters: account, status, channel type, name/ID search; reset button | ✓ Works |
 | IngestionPage | Manual run form, live progress panel | ✓ Works |
-| SheetsPage | Config table, manual export form, name filter | ✓ Works |
+| SheetsPage | Config table with filters (account, active state, data mode), manual export form, campaign name filter | ✓ Works |
 | SchedulerPage | Settings form, catchup/refresh explanation | ✓ Works |
 
 ### Hooks & Components
@@ -367,7 +378,7 @@ EXPORT_COLUMN_KEYS = [
 
 ### Limitations
 
-1. **Upsert Write Mode Only** — APPEND/OVERWRITE not currently implemented (future feature)
+1. **Upsert Write Mode Only** — UPSERT is the only supported Sheets write mode (design decision, not a future feature). Rows are deduplicated by content hash; repeated exports mark unchanged rows as SKIPPED.
 2. **Single Manager Account** — One MCC per deployment
 3. **Timezone Fixed** — Scheduler uses single timezone (Europe/Kyiv by default)
 4. **Rate Limit Simple** — IP/email-based; no sophisticated user behavior detection
