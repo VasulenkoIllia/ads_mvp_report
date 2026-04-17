@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Button, Input, Space, Switch, Table, Tag, Tooltip, Typography, message,
+  Button, Input, Select, Space, Switch, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
 import { CheckCircleOutlined, CloudSyncOutlined, ReloadOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons';
 import { accountsApi, type AdsAccount } from '../api/accounts.js';
@@ -46,6 +46,8 @@ export function AccountsPage() {
   const [coverage, setCoverage] = useState<Map<string, CoverageItem>>(new Map());
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [filterStatuses, setFilterStatuses] = useState<string[]>([]);
+  const [filterIngestion, setFilterIngestion] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncingCampaigns, setSyncingCampaigns] = useState<string | 'all' | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -105,9 +107,18 @@ export function AccountsPage() {
     } catch (e) { setError(e); }
   }
 
-  const filtered = accounts.filter((a) =>
-    !search || a.descriptiveName.toLowerCase().includes(search.toLowerCase()) || a.customerId.includes(search),
-  );
+  const statusOptions = useMemo(() => {
+    const unique = [...new Set(accounts.map((a) => a.googleStatus).filter(Boolean))] as string[];
+    return unique.sort().map((s) => ({ value: s, label: s }));
+  }, [accounts]);
+
+  const filtered = accounts.filter((a) => {
+    if (search && !a.descriptiveName.toLowerCase().includes(search.toLowerCase()) && !a.customerId.includes(search)) return false;
+    if (filterStatuses.length > 0 && !filterStatuses.includes(a.googleStatus ?? '')) return false;
+    if (filterIngestion === 'enabled' && !a.ingestionEnabled) return false;
+    if (filterIngestion === 'disabled' && a.ingestionEnabled) return false;
+    return true;
+  });
 
   const columns = [
     {
@@ -201,13 +212,35 @@ export function AccountsPage() {
 
       <ErrorAlert error={error} />
 
-      <Input.Search
-        placeholder="Пошук по назві або Customer ID…"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        style={{ maxWidth: 360, marginBottom: 12 }}
-        allowClear
-      />
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Input.Search
+          placeholder="Пошук по назві або Customer ID…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ width: 300 }}
+          allowClear
+        />
+        <Select
+          mode="multiple"
+          placeholder="Статус Google"
+          value={filterStatuses}
+          onChange={setFilterStatuses}
+          options={statusOptions}
+          style={{ minWidth: 180 }}
+          allowClear
+          maxTagCount="responsive"
+        />
+        <Select
+          value={filterIngestion}
+          onChange={setFilterIngestion}
+          style={{ width: 180 }}
+          options={[
+            { value: 'all', label: 'Завантаження: усі' },
+            { value: 'enabled', label: 'Завантаження: увімкнено' },
+            { value: 'disabled', label: 'Завантаження: вимкнено' },
+          ]}
+        />
+      </Space>
 
       <Table
         size="small"
