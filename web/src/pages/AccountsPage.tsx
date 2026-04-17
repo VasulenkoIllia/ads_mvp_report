@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Button, Input, Select, Space, Switch, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { CheckCircleOutlined, CloudSyncOutlined, ReloadOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons';
+import { CheckCircleOutlined, ClearOutlined, CloudSyncOutlined, ReloadOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons';
 import { accountsApi, type AdsAccount } from '../api/accounts.js';
 import { campaignsApi } from '../api/campaigns.js';
 import { ingestionApi, type CoverageItem } from '../api/ingestion.js';
@@ -48,6 +48,7 @@ export function AccountsPage() {
   const [search, setSearch] = useState('');
   const [filterStatuses, setFilterStatuses] = useState<string[]>([]);
   const [filterIngestion, setFilterIngestion] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [filterFreshness, setFilterFreshness] = useState<'all' | 'ok' | 'stale' | 'missing'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncingCampaigns, setSyncingCampaigns] = useState<string | 'all' | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -117,8 +118,23 @@ export function AccountsPage() {
     if (filterStatuses.length > 0 && !filterStatuses.includes(a.googleStatus ?? '')) return false;
     if (filterIngestion === 'enabled' && !a.ingestionEnabled) return false;
     if (filterIngestion === 'disabled' && a.ingestionEnabled) return false;
+    if (filterFreshness !== 'all') {
+      const cov = coverage.get(a.id);
+      if (filterFreshness === 'ok' && (!a.ingestionEnabled || !cov?.hasDataForYesterday)) return false;
+      if (filterFreshness === 'stale' && (!a.ingestionEnabled || !cov?.lastFactDate || cov.hasDataForYesterday)) return false;
+      if (filterFreshness === 'missing' && (!a.ingestionEnabled || cov?.lastFactDate)) return false;
+    }
     return true;
   });
+
+  const hasActiveFilters = search || filterStatuses.length > 0 || filterIngestion !== 'all' || filterFreshness !== 'all';
+
+  function resetFilters() {
+    setSearch('');
+    setFilterStatuses([]);
+    setFilterIngestion('all');
+    setFilterFreshness('all');
+  }
 
   const columns = [
     {
@@ -217,7 +233,7 @@ export function AccountsPage() {
           placeholder="Пошук по назві або Customer ID…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 300 }}
+          style={{ width: 280 }}
           allowClear
         />
         <Select
@@ -226,20 +242,36 @@ export function AccountsPage() {
           value={filterStatuses}
           onChange={setFilterStatuses}
           options={statusOptions}
-          style={{ minWidth: 180 }}
+          style={{ minWidth: 160 }}
           allowClear
           maxTagCount="responsive"
         />
         <Select
           value={filterIngestion}
           onChange={setFilterIngestion}
-          style={{ width: 180 }}
+          style={{ width: 190 }}
           options={[
             { value: 'all', label: 'Завантаження: усі' },
             { value: 'enabled', label: 'Завантаження: увімкнено' },
             { value: 'disabled', label: 'Завантаження: вимкнено' },
           ]}
         />
+        <Select
+          value={filterFreshness}
+          onChange={setFilterFreshness}
+          style={{ width: 190 }}
+          options={[
+            { value: 'all', label: 'Дані: усі' },
+            { value: 'ok', label: '✅ Дані: актуальні' },
+            { value: 'stale', label: '⚠️ Дані: застарілі' },
+            { value: 'missing', label: '❌ Дані: відсутні' },
+          ]}
+        />
+        {hasActiveFilters && (
+          <Tooltip title="Скинути всі фільтри">
+            <Button icon={<ClearOutlined />} onClick={resetFilters} size="small" />
+          </Tooltip>
+        )}
       </Space>
 
       <Table

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Button, Input, Select, Space, Table, Tag, Typography, message } from 'antd';
-import { ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+import { Button, Input, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { ClearOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import { accountsApi, type AdsAccount } from '../api/accounts.js';
 import { campaignsApi, type Campaign } from '../api/campaigns.js';
 import { AccountSelector } from '../components/AccountSelector.js';
@@ -23,6 +23,7 @@ export function CampaignsPage() {
   const [accountId, setAccountId] = useState<string | undefined>();
   const [status, setStatus] = useState<string | undefined>();
   const [search, setSearch] = useState('');
+  const [channel, setChannel] = useState<string | undefined>();
   const [error, setError] = useState<unknown>(null);
   const [messageApi, contextHolder] = message.useMessage();
 
@@ -56,9 +57,20 @@ export function CampaignsPage() {
     finally { setSyncing(false); }
   }
 
-  const filtered = search
-    ? campaigns.filter((c) => c.campaignName.toLowerCase().includes(search.toLowerCase()) || c.campaignId.includes(search))
-    : campaigns;
+  const filtered = campaigns.filter((c) => {
+    if (search && !c.campaignName.toLowerCase().includes(search.toLowerCase()) && !c.campaignId.includes(search)) return false;
+    if (channel && c.advertisingChannel !== channel) return false;
+    return true;
+  });
+
+  const hasActiveFilters = Boolean(search || accountId || status || channel);
+
+  function resetFilters() {
+    setSearch('');
+    setAccountId(undefined);
+    setStatus(undefined);
+    setChannel(undefined);
+  }
 
   const columns = [
     {
@@ -147,7 +159,7 @@ export function CampaignsPage() {
           onChange={setAccountId}
           placeholder="Всі акаунти"
           includeAll
-          style={{ width: 280 }}
+          style={{ width: 260 }}
         />
         <Select
           allowClear
@@ -161,13 +173,26 @@ export function CampaignsPage() {
             { value: 'REMOVED', label: '🔴 Видалена' },
           ]}
         />
+        <Select
+          allowClear
+          placeholder="Тип кампанії"
+          value={channel}
+          onChange={setChannel}
+          style={{ width: 190 }}
+          options={Object.entries(CHANNEL_LABELS).map(([v, l]) => ({ value: v, label: l }))}
+        />
         <Input.Search
           placeholder="Пошук по назві або ID…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ width: 240 }}
+          style={{ width: 230 }}
           allowClear
         />
+        {hasActiveFilters && (
+          <Tooltip title="Скинути всі фільтри">
+            <Button icon={<ClearOutlined />} onClick={resetFilters} size="small" />
+          </Tooltip>
+        )}
       </Space>
 
       <Space size={16} style={{ marginBottom: 12 }}>
