@@ -267,9 +267,9 @@ EXPORT_COLUMN_KEYS = [
 
 | Page | Components | Status |
 |------|------------|--------|
-| OverviewPage | Status cards, recent runs, alerts | ✓ Works |
-| AccountsPage | Account list, filters: name/ID, Google status (multi), ingestion toggle, data freshness; reset button | ✓ Works |
-| CampaignsPage | Campaign browser, filters: account, status, channel type, name/ID search; reset button | ✓ Works |
+| OverviewPage | Status cards, recent runs, alerts; Accounts card shows missing-data badge | ✓ Works |
+| AccountsPage | Filters (name/ID, Google status, ingestion, freshness), row highlights (stale=yellow, missing=pink), sort by problem-first, bulk enable/disable, Sheets config column, empty-state hint | ✓ Works |
+| CampaignsPage | Filters (account, status, channel type, name/ID), reset button, empty-state hint | ✓ Works |
 | IngestionPage | Manual run form, live progress panel | ✓ Works |
 | SheetsPage | Config table with filters (account, active state, data mode), manual export form, campaign name filter | ✓ Works |
 | SchedulerPage | Settings form, catchup/refresh explanation | ✓ Works |
