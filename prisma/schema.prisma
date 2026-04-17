@@ -135,11 +135,13 @@ model AdsAccount {
   updatedAt        DateTime @updatedAt
   connectionId     String
 
-  connection      GoogleOAuthConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  facts           CampaignDailyFact[]
-  ingestionRuns   IngestionAccountRun[]
-  sheetConfigs    AccountSheetConfig[]
+  connection           GoogleOAuthConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  facts                CampaignDailyFact[]
+  ingestionRuns        IngestionAccountRun[]
+  sheetConfigs         AccountSheetConfig[]
   manualSheetRangeRuns SheetManualRangeRun[]
+  campaigns            Campaign[]
+  campaignSyncRuns     CampaignSyncRun[]
 
   @@index([isInMcc, ingestionEnabled, googleStatus])
 }
@@ -296,6 +298,7 @@ model SheetManualRangeRun {
   columnMode          SheetColumnMode @default(ALL)
   selectedColumnsCsv  String          @default("")
   campaignStatusesCsv String          @default("")
+  campaignNameSearch  String          @default("")
   dateFrom            DateTime
   dateTo              DateTime
   totalDays           Int
@@ -355,4 +358,41 @@ model SchedulerSettings {
   sheetsMaxConfigsPerTick   Int      @default(200)
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
+}
+
+model Campaign {
+  id                 String   @id @default(cuid())
+  adsAccountId       String
+  campaignId         String
+  campaignName       String
+  campaignStatus     String
+  advertisingChannel String?
+  firstSeenAt        DateTime @default(now())
+  lastSeenAt         DateTime @default(now())
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  adsAccount AdsAccount @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([adsAccountId, campaignId])
+  @@index([adsAccountId, campaignStatus])
+}
+
+model CampaignSyncRun {
+  id              String        @id @default(cuid())
+  adsAccountId    String
+  status          SyncRunStatus @default(RUNNING)
+  startedAt       DateTime      @default(now())
+  finishedAt      DateTime?
+  totalSeen       Int           @default(0)
+  discoveredCount Int           @default(0)
+  updatedCount    Int           @default(0)
+  errorSummary    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  adsAccount AdsAccount @relation(fields: [adsAccountId], references: [id], onDelete: Cascade)
+
+  @@index([adsAccountId, startedAt])
+  @@index([status, startedAt])
 }

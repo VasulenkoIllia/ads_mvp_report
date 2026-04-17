@@ -11,6 +11,7 @@ import { prisma } from './lib/prisma.js';
 import { createRateLimiter } from './lib/rate-limit.js';
 import { authRouter } from './modules/auth/auth.route.js';
 import { ensureAppSession, getAppSessionFromRequest } from './modules/auth/auth.service.js';
+import { campaignsRouter } from './modules/campaigns/campaigns.route.js';
 import { googleRouter } from './modules/google/google.route.js';
 import { ingestionRouter } from './modules/ingestion/ingestion.route.js';
 import { schedulerRouter } from './modules/scheduler/scheduler.route.js';
@@ -55,6 +56,7 @@ function isWriteRateLimitedPath(pathname: string): boolean {
     pathname === '/auth/logout' ||
     pathname === '/google/oauth/disconnect' ||
     pathname === '/google/accounts/sync' ||
+    pathname === '/campaigns/sync' ||
     pathname === '/ingestion/runs' ||
     pathname === '/scheduler/settings' ||
     pathname === '/sheets/runs' ||
@@ -167,6 +169,7 @@ async function bootstrap() {
   app.use('/api/v1/auth', authRouter);
   app.use('/api/v1', requireAuthenticatedSession);
   app.use('/api/v1/google', googleRouter);
+  app.use('/api/v1/campaigns', campaignsRouter);
   app.use('/api/v1/ingestion', ingestionRouter);
   app.use('/api/v1/sheets', sheetsRouter);
   app.use('/api/v1/scheduler', schedulerRouter);

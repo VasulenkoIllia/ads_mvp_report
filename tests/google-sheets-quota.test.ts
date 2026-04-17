@@ -64,6 +64,25 @@ test('resolveGoogleSheetsQuotaRetryDelayMs enforces 65s floor for read/min/user 
   assert.equal(delay, 65_000);
 });
 
+test('resolveGoogleSheetsQuotaRetryDelayMs enforces 65s floor for write/min/user limit', () => {
+  const delay = resolveGoogleSheetsQuotaRetryDelayMs(
+    {
+      retryAfterSeconds: null,
+      quotaMetric: 'sheets.googleapis.com/write_requests',
+      quotaLimit: 'WriteRequestsPerMinutePerUser',
+      quotaLimitValue: 60,
+      quotaUnit: '1/min/{project}/{user}',
+      quotaLocation: null,
+      service: 'sheets.googleapis.com',
+      consumer: 'projects/123',
+      reason: 'RATE_LIMIT_EXCEEDED'
+    },
+    900
+  );
+
+  assert.equal(delay, 65_000);
+});
+
 test('formatGoogleSheetsQuotaMessage includes normalized fields', () => {
   const message = formatGoogleSheetsQuotaMessage({
     retryAfterSeconds: 61,

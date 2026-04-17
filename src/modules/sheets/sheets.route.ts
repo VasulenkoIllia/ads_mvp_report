@@ -17,6 +17,7 @@ import {
   listManualSheetExportRangeRuns,
   listSheetExportConfigs,
   listSheetExportRuns,
+  previewSheetExport,
   runManualSheetExportForDate,
   runSheetExports,
   startManualSheetExportRange,
@@ -62,7 +63,8 @@ const manualRunSchema = z.object({
   dataMode: z.nativeEnum(SheetDataMode).optional(),
   columnMode: z.nativeEnum(SheetColumnMode).optional(),
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
-  campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional()
+  campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  campaignNameSearch: z.string().trim().max(200).optional()
 });
 
 const manualRangeRunSchema = z.object({
@@ -75,7 +77,8 @@ const manualRangeRunSchema = z.object({
   dataMode: z.nativeEnum(SheetDataMode).optional(),
   columnMode: z.nativeEnum(SheetColumnMode).optional(),
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
-  campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional()
+  campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  campaignNameSearch: z.string().trim().max(200).optional()
 });
 
 const listRunsQuerySchema = z.object({
@@ -83,6 +86,18 @@ const listRunsQuerySchema = z.object({
   status: z.nativeEnum(SheetRunStatus).optional(),
   triggerSource: z.nativeEnum(TriggerSource).optional(),
   take: z.coerce.number().int().min(1).max(200).optional()
+});
+
+const previewQuerySchema = z.object({
+  accountId: z.string().min(1),
+  dateFrom: z.string().regex(dateRegex),
+  dateTo: z.string().regex(dateRegex),
+  dataMode: z.nativeEnum(SheetDataMode).optional(),
+  columnMode: z.nativeEnum(SheetColumnMode).optional(),
+  selectedColumns: z.string().optional(),
+  campaignStatuses: z.string().optional(),
+  campaignNameSearch: z.string().trim().max(200).optional(),
+  take: z.coerce.number().int().min(1).max(500).optional()
 });
 
 const listManualRangeRunsQuerySchema = z.object({
@@ -217,7 +232,8 @@ sheetsRouter.post(
       dataMode: payload.dataMode,
       columnMode: payload.columnMode,
       selectedColumns: payload.selectedColumns,
-      campaignStatuses: payload.campaignStatuses
+      campaignStatuses: payload.campaignStatuses,
+      campaignNameSearch: payload.campaignNameSearch
     });
 
     res.status(200).json(result);
@@ -239,7 +255,8 @@ sheetsRouter.post(
       dataMode: payload.dataMode,
       columnMode: payload.columnMode,
       selectedColumns: payload.selectedColumns,
-      campaignStatuses: payload.campaignStatuses
+      campaignStatuses: payload.campaignStatuses,
+      campaignNameSearch: payload.campaignNameSearch
     });
 
     res.status(200).json(result);
@@ -287,6 +304,27 @@ sheetsRouter.get(
   '/runs/:runId',
   asyncHandler(async (req, res) => {
     const result = await getSheetExportRunById(req.params.runId);
+    res.status(200).json(result);
+  })
+);
+
+sheetsRouter.get(
+  '/preview',
+  asyncHandler(async (req, res) => {
+    const payload = parseQuery(previewQuerySchema, req.query);
+
+    const result = await previewSheetExport({
+      accountId: payload.accountId,
+      dateFrom: payload.dateFrom,
+      dateTo: payload.dateTo,
+      dataMode: payload.dataMode,
+      columnMode: payload.columnMode,
+      selectedColumns: payload.selectedColumns ? payload.selectedColumns.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      campaignStatuses: payload.campaignStatuses ? payload.campaignStatuses.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      campaignNameSearch: payload.campaignNameSearch,
+      take: payload.take
+    });
+
     res.status(200).json(result);
   })
 );

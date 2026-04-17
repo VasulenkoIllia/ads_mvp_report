@@ -634,13 +634,22 @@ export function startSchedulers(logger?: Partial<SchedulerLogger>) {
     intervalId.unref();
   }
 
-  void tick();
+  if (env.SCHEDULER_INITIAL_DELAY_SECONDS > 0) {
+    schedulerLogger.info(
+      { delaySeconds: env.SCHEDULER_INITIAL_DELAY_SECONDS },
+      'Scheduler initial tick delayed.'
+    );
+    setTimeout(() => { void tick(); }, env.SCHEDULER_INITIAL_DELAY_SECONDS * 1000);
+  } else {
+    void tick();
+  }
 
   schedulerLogger.info(
     {
       pollSeconds: env.SCHEDULER_POLL_SECONDS,
       catchupDays: env.SCHEDULER_CATCHUP_DAYS,
-      refreshDays: env.SCHEDULER_REFRESH_DAYS
+      refreshDays: env.SCHEDULER_REFRESH_DAYS,
+      initialDelaySeconds: env.SCHEDULER_INITIAL_DELAY_SECONDS
     },
     'Scheduler started.'
   );

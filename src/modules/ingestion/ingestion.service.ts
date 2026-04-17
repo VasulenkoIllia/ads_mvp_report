@@ -29,7 +29,6 @@ import { getGoogleAdsRuntimeCredentials } from '../google/google.service.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const ACTIVE_GOOGLE_ACCOUNT_STATUS = 'ENABLED';
-const ACTIVE_CAMPAIGN_STATUS = 'ENABLED';
 const INGESTION_START_LOCK_KEY = 10401001n;
 
 type CampaignRow = {
@@ -116,9 +115,11 @@ export type RunGoogleAdsIngestionParams = {
   dateFrom?: string;
   dateTo?: string;
   accountId?: string;
+  campaignId?: string;
   takeAccounts?: number;
   batchSize?: number;
   enabledOnly?: boolean;
+  includeInactiveAccounts?: boolean;
   triggerSource?: TriggerSource;
 };
 
@@ -155,6 +156,7 @@ type IngestionPreflightResult = {
     batchSize: number;
     maxRangeDays: number;
     enabledOnly: boolean;
+    includeInactiveAccounts: boolean;
   };
   runningRun: {
     id: string;
@@ -503,12 +505,19 @@ function clampBatchSize(value: number | undefined): number {
   return Math.min(requested, 500);
 }
 
-function buildEligibleAccountsWhere(params: { accountId?: string; enabledOnly?: boolean }): Prisma.AdsAccountWhereInput {
+function buildEligibleAccountsWhere(params: {
+  accountId?: string;
+  enabledOnly?: boolean;
+  includeInactiveAccounts?: boolean;
+}): Prisma.AdsAccountWhereInput {
   const where: Prisma.AdsAccountWhereInput = {
     isInMcc: true,
-    isManager: false,
-    googleStatus: ACTIVE_GOOGLE_ACCOUNT_STATUS
+    isManager: false
   };
+
+  if (!params.includeInactiveAccounts) {
+    where.googleStatus = ACTIVE_GOOGLE_ACCOUNT_STATUS;
+  }
 
   if (params.enabledOnly ?? true) {
     where.ingestionEnabled = true;
@@ -557,8 +566,11 @@ async function fetchCampaignMetricsForDate(params: {
   managerCustomerId: string;
   customerId: string;
   runDate: string;
+  campaignId?: string;
 }): Promise<IngestionFactRow[]> {
   const endpoint = `https://googleads.googleapis.com/${env.GOOGLE_ADS_API_VERSION}/customers/${params.customerId}/googleAds:searchStream`;
+
+  const campaignFilter = params.campaignId ? `\n  AND campaign.id = '${params.campaignId}'` : '';
 
   const query = `SELECT
   campaign.id,
@@ -575,8 +587,7 @@ async function fetchCampaignMetricsForDate(params: {
   metrics.cost_per_conversion,
   metrics.conversions_value
 FROM campaign
-WHERE segments.date = '${params.runDate}'
-  AND campaign.status = '${ACTIVE_CAMPAIGN_STATUS}'`;
+WHERE segments.date = '${params.runDate}'${campaignFilter}`;
 
   const response = await withRetries(() =>
     axios.post<CampaignBatch[]>(
@@ -603,6 +614,7 @@ async function processAccountForDate(params: {
   runDateText: string;
   account: IngestionEligibleAccount;
   credentials: Awaited<ReturnType<typeof getGoogleAdsRuntimeCredentials>>;
+  campaignId?: string;
 }): Promise<{
   status: IngestionAccountRunStatus;
   rowsUpserted: number;
@@ -626,7 +638,8 @@ async function processAccountForDate(params: {
       developerToken: params.credentials.developerToken,
       managerCustomerId: params.credentials.managerCustomerId,
       customerId: params.account.customerId,
-      runDate: params.runDateText
+      runDate: params.runDateText,
+      campaignId: params.campaignId
     });
 
     if (rows.length === 0) {
@@ -728,10 +741,32 @@ async function processAccountForDate(params: {
       error: null
     };
   } catch (error) {
+    // 404 from Google Ads means the account/entity doesn't exist or is not accessible.
+    // Treat as SKIPPED — not a failure, data simply unavailable for this account.
+    const isNotFound = axios.isAxiosError(error) && error.response?.status === 404;
+
     const message =
       error instanceof GoogleAdsQuotaExhaustedError
         ? truncate(formatGoogleAdsQuotaMessage(error.meta), 1000)
         : truncate(toErrorMessage(error), 1000);
+
+    if (isNotFound) {
+      await prisma.ingestionAccountRun.update({
+        where: { id: accountRun.id },
+        data: {
+          status: IngestionAccountRunStatus.SKIPPED,
+          rowsUpserted: 0,
+          finishedAt: new Date(),
+          errorSummary: `Акаунт недоступний в Google Ads (404): ${message}`
+        }
+      });
+
+      return {
+        status: IngestionAccountRunStatus.SKIPPED,
+        rowsUpserted: 0,
+        error: null
+      };
+    }
 
     await prisma.ingestionAccountRun.update({
       where: {
@@ -820,6 +855,7 @@ export async function preflightGoogleAdsIngestion(params: {
   takeAccounts?: number;
   batchSize?: number;
   enabledOnly?: boolean;
+  includeInactiveAccounts?: boolean;
   skipRunningCheck?: boolean;
   autoFailStaleRuns?: boolean;
 }): Promise<IngestionPreflightResult> {
@@ -832,9 +868,11 @@ export async function preflightGoogleAdsIngestion(params: {
   const requestedAccounts = clampTakeAccounts(params.takeAccounts);
   const batchSize = clampBatchSize(params.batchSize);
   const enabledOnly = params.enabledOnly ?? true;
+  const includeInactiveAccounts = params.includeInactiveAccounts ?? false;
   const where = buildEligibleAccountsWhere({
     accountId: params.accountId,
-    enabledOnly
+    enabledOnly,
+    includeInactiveAccounts
   });
 
   const staleRunsAutoFailed = params.autoFailStaleRuns ? await markStaleIngestionRunsAsFailed() : 0;
@@ -962,7 +1000,8 @@ export async function preflightGoogleAdsIngestion(params: {
       selectedAccounts,
       batchSize,
       maxRangeDays: env.INGESTION_MAX_RANGE_DAYS,
-      enabledOnly
+      enabledOnly,
+      includeInactiveAccounts
     },
     runningRun: runningConflict
   };
@@ -977,6 +1016,7 @@ export async function runGoogleAdsIngestion(params: RunGoogleAdsIngestionParams 
     takeAccounts: params.takeAccounts,
     batchSize: params.batchSize,
     enabledOnly: params.enabledOnly,
+    includeInactiveAccounts: params.includeInactiveAccounts,
     autoFailStaleRuns: true
   });
 
@@ -987,7 +1027,8 @@ export async function runGoogleAdsIngestion(params: RunGoogleAdsIngestionParams 
   const runWindow = preflight.runWindow;
   const where = buildEligibleAccountsWhere({
     accountId: params.accountId,
-    enabledOnly: preflight.limits.enabledOnly
+    enabledOnly: preflight.limits.enabledOnly,
+    includeInactiveAccounts: preflight.limits.includeInactiveAccounts
   });
   const runDate = parseDateOnlyToUtcDayStart(runWindow.runDate);
   const dateFrom = parseDateOnlyToUtcDayStart(runWindow.dateFrom);
@@ -1103,7 +1144,8 @@ export async function runGoogleAdsIngestion(params: RunGoogleAdsIngestionParams 
           runDate: day,
           runDateText: dayText,
           account,
-          credentials
+          credentials,
+          campaignId: params.campaignId
         });
 
         rowsUpserted += result.rowsUpserted;
@@ -1327,6 +1369,51 @@ export async function listCampaignDailyFacts(filters: {
   return { items };
 }
 
+export async function previewCampaignDailyFacts(filters: {
+  accountId?: string;
+  campaignId?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  take?: number;
+}) {
+  const take = Math.min(Math.max(filters.take ?? 100, 1), 500);
+
+  const where: Prisma.CampaignDailyFactWhereInput = {
+    adsAccountId: filters.accountId,
+    ...(filters.campaignId ? { campaignId: filters.campaignId } : {})
+  };
+
+  if (filters.dateFrom || filters.dateTo) {
+    const from = filters.dateFrom ? parseDateOnlyToUtcDayStart(filters.dateFrom) : null;
+    const to = filters.dateTo ? parseDateOnlyToUtcDayStart(filters.dateTo) : null;
+
+    where.factDate = {
+      gte: from ?? undefined,
+      lt: to ? new Date(to.getTime() + DAY_MS) : undefined
+    };
+  }
+
+  const [items, total] = await Promise.all([
+    prisma.campaignDailyFact.findMany({
+      where,
+      take,
+      orderBy: [{ factDate: 'desc' }, { cost: 'desc' }],
+      include: {
+        adsAccount: {
+          select: {
+            id: true,
+            customerId: true,
+            descriptiveName: true
+          }
+        }
+      }
+    }),
+    prisma.campaignDailyFact.count({ where })
+  ]);
+
+  return { items, total, showing: items.length };
+}
+
 function summarizeStatuses(statuses: IngestionRunStatus[]) {
   const counts = {
     total: statuses.length,
@@ -1438,4 +1525,82 @@ export async function getGoogleAdsIngestionHealth() {
       rowsUpserted24h: rowsLast24h._sum.rowsUpserted ?? 0
     }
   };
+}
+
+/* ─── Coverage ────────────────────────────────────────────────────────────── */
+
+export async function getIngestionCoverage() {
+  const now = new Date();
+  const yesterday = getDefaultYesterdayRunDate(now, 'Europe/Kyiv');
+  const yesterdayStr = toDateOnlyString(yesterday);
+
+  // Get all eligible (ingestion-enabled) accounts
+  const accounts = await prisma.adsAccount.findMany({
+    where: buildEligibleAccountsWhere({ enabledOnly: true }),
+    select: {
+      id: true,
+      customerId: true,
+      descriptiveName: true,
+    },
+    orderBy: { descriptiveName: 'asc' },
+  });
+
+  if (accounts.length === 0) {
+    return { items: [], yesterdayDate: yesterdayStr };
+  }
+
+  // Get last fact date per account
+  const lastFactByAccount = await prisma.campaignDailyFact.groupBy({
+    by: ['adsAccountId'],
+    _max: { factDate: true },
+    where: {
+      adsAccountId: { in: accounts.map((a) => a.id) },
+    },
+  });
+
+  const lastFactMap = new Map(
+    lastFactByAccount.map((r) => [r.adsAccountId, r._max.factDate])
+  );
+
+  const items = accounts.map((acc) => {
+    const lastFactDate = lastFactMap.get(acc.id);
+    const lastFactDateStr = lastFactDate ? toDateOnlyString(lastFactDate) : null;
+    const hasDataForYesterday = lastFactDateStr === yesterdayStr;
+    let staleDays: number | null = null;
+    if (lastFactDate) {
+      staleDays = Math.floor((yesterday.getTime() - lastFactDate.getTime()) / DAY_MS);
+      if (staleDays < 0) staleDays = 0;
+    }
+    return {
+      accountId: acc.id,
+      customerId: acc.customerId,
+      descriptiveName: acc.descriptiveName,
+      lastFactDate: lastFactDateStr,
+      hasDataForYesterday,
+      staleDays,
+    };
+  });
+
+  return { items, yesterdayDate: yesterdayStr };
+}
+
+/* ─── Active run (live polling) ───────────────────────────────────────────── */
+
+export async function getActiveIngestionRun() {
+  const run = await prisma.ingestionRun.findFirst({
+    where: { status: IngestionRunStatus.RUNNING },
+    orderBy: { startedAt: 'desc' },
+    include: {
+      accountRuns: {
+        orderBy: { startedAt: 'desc' },
+        include: {
+          adsAccount: {
+            select: { customerId: true, descriptiveName: true },
+          },
+        },
+      },
+    },
+  });
+
+  return run ?? null;
 }

@@ -1,7 +1,6 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import {
-  IngestionRunStatus,
   SheetColumnMode,
   SheetDataMode,
   SheetRunStatus,
@@ -122,6 +121,11 @@ let manualRangeRunWorkerBusy = false;
 function toErrorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
+
+    if (status === 404) {
+      return 'Таблицю не знайдено (404). Перевірте Spreadsheet ID та доступ Google-акаунта до таблиці.';
+    }
+
     const payload =
       typeof error.response?.data === 'string'
         ? error.response.data
@@ -580,28 +584,6 @@ async function updateRangeValues(params: {
   );
 }
 
-async function clearSheet(params: {
-  spreadsheetId: string;
-  sheetName: string;
-  accessToken: string;
-}): Promise<void> {
-  const range = toA1Range(params.sheetName, 'A1', 'ZZ1000000');
-
-  await withSheetsRetries(() =>
-    axios.post(
-      toSheetsUrl(params.spreadsheetId, range, ':clear'),
-      {},
-      {
-        headers: {
-          Authorization: `Bearer ${params.accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: env.GOOGLE_SHEETS_HTTP_TIMEOUT_MS
-      }
-    )
-  );
-}
-
 async function appendValues(params: {
   spreadsheetId: string;
   sheetName: string;
@@ -780,9 +762,11 @@ async function prepareRowsForConfig(params: {
   dataMode: SheetDataMode;
   campaignStatuses: string[];
   selectedColumns: SheetExportColumnKey[];
+  campaignNameSearch?: string;
 }): Promise<PreparedExportRowsPayload> {
   const runDateText = toDateOnlyString(params.runDate);
   const window = getUtcDayWindow(params.runDate);
+  const nameSearch = params.campaignNameSearch?.trim() ?? '';
 
   const facts = await prisma.campaignDailyFact.findMany({
     where: {
@@ -791,7 +775,8 @@ async function prepareRowsForConfig(params: {
         gte: window.start,
         lt: window.end
       },
-      campaignStatus: params.campaignStatuses.length > 0 ? { in: params.campaignStatuses } : undefined
+      campaignStatus: params.campaignStatuses.length > 0 ? { in: params.campaignStatuses } : undefined,
+      ...(nameSearch ? { campaignName: { contains: nameSearch, mode: 'insensitive' } } : {})
     },
     include: {
       adsAccount: {
@@ -856,86 +841,6 @@ async function prepareRowsForConfig(params: {
   return {
     selectedColumns: params.selectedColumns,
     rows
-  };
-}
-
-async function runOverwriteMode(params: {
-  runId: string;
-  configId: string;
-  spreadsheetId: string;
-  sheetName: string;
-  accessToken: string;
-  headers: SheetExportColumnKey[];
-  rows: PreparedExportRow[];
-  persistRowState?: boolean;
-  progressRunId?: string;
-}) {
-  if (params.progressRunId) {
-    await prisma.sheetExportRun.update({
-      where: {
-        id: params.progressRunId
-      },
-      data: {
-        rowsPrepared: params.rows.length,
-        rowsWritten: 0,
-        rowsSkipped: 0,
-        rowsFailed: 0
-      }
-    });
-  }
-
-  await ensureSheetTabExists({
-    spreadsheetId: params.spreadsheetId,
-    sheetName: params.sheetName,
-    accessToken: params.accessToken
-  });
-
-  const values = [Array.from(params.headers), ...params.rows.map((row) => row.values)];
-  const fullRange = toA1Range(params.sheetName, 'A1');
-
-  await clearSheet({
-    spreadsheetId: params.spreadsheetId,
-    sheetName: params.sheetName,
-    accessToken: params.accessToken
-  });
-
-  await updateRangeValues({
-    spreadsheetId: params.spreadsheetId,
-    range: fullRange,
-    values,
-    accessToken: params.accessToken
-  });
-
-  if (params.persistRowState !== false) {
-    const now = new Date();
-
-    await prisma.$transaction(async (tx) => {
-      await tx.sheetRowState.deleteMany({
-        where: {
-          configId: params.configId
-        }
-      });
-
-      if (params.rows.length > 0) {
-        await tx.sheetRowState.createMany({
-          data: params.rows.map((row, index) => ({
-            configId: params.configId,
-            rowKey: row.rowKey,
-            rowHash: row.rowHash,
-            rowIndex: index + 2,
-            lastRunId: params.runId,
-            lastExportedAt: now
-          }))
-        });
-      }
-    });
-  }
-
-  return {
-    rowsWritten: params.rows.length,
-    rowsSkipped: 0,
-    rowsFailed: 0,
-    rowErrors: [] as string[]
   };
 }
 
@@ -1253,6 +1158,60 @@ function mapSheetExportConfig<T extends {
     selectedColumns:
       config.columnMode === SheetColumnMode.MANUAL ? ensureRequiredUpsertColumns(selectedColumns as SheetExportColumnKey[]) : selectedColumns,
     campaignStatuses: parseCsvList(config.campaignStatusesCsv)
+  };
+}
+
+export async function previewSheetExport(params: {
+  accountId: string;
+  dateFrom: string;
+  dateTo: string;
+  dataMode?: SheetDataMode;
+  columnMode?: SheetColumnMode;
+  selectedColumns?: string[];
+  campaignStatuses?: string[];
+  campaignNameSearch?: string;
+  take?: number;
+}) {
+  const take = Math.min(Math.max(params.take ?? 100, 1), 500);
+  const dataMode = params.dataMode ?? SheetDataMode.CAMPAIGN;
+  const columnMode = params.columnMode ?? SheetColumnMode.ALL;
+  const selectedColumns =
+    columnMode === SheetColumnMode.ALL
+      ? Array.from(EXPORT_COLUMN_KEYS)
+      : ensureRequiredUpsertColumns(normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL));
+  const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
+
+  const from = parseDateOnlyToUtcDayStart(params.dateFrom);
+  const to = parseDateOnlyToUtcDayStart(params.dateTo);
+
+  const runDates = enumerateDateRange({ dateFrom: from, dateTo: to });
+
+  const allRows: Array<{ date: string; values: Array<string | number> }> = [];
+
+  for (const runDate of runDates) {
+    if (allRows.length >= take) break;
+
+    const prepared = await prepareRowsForConfig({
+      accountId: params.accountId,
+      runDate,
+      dataMode,
+      campaignStatuses,
+      selectedColumns,
+      campaignNameSearch: params.campaignNameSearch
+    });
+
+    for (const row of prepared.rows) {
+      if (allRows.length >= take) break;
+      allRows.push({ date: toDateOnlyString(runDate), values: row.values });
+    }
+  }
+
+  return {
+    columns: selectedColumns,
+    rows: allRows,
+    totalRows: allRows.length,
+    dateFrom: params.dateFrom,
+    dateTo: params.dateTo
   };
 }
 
@@ -1645,31 +1604,18 @@ export async function runSheetExportConfigById(params: {
     });
 
     const rowsPrepared = prepared.rows.length;
-    const effectiveWriteMode = resolveForcedWriteMode(config.writeMode);
 
-    const result =
-      effectiveWriteMode === SheetWriteMode.OVERWRITE
-        ? await runOverwriteMode({
-            runId: run.id,
-            configId: config.id,
-            spreadsheetId: config.spreadsheetId,
-            sheetName: config.sheetName,
-            accessToken: oauth.accessToken,
-            headers: prepared.selectedColumns,
-            rows: prepared.rows,
-            progressRunId: run.id
-          })
-        : await runAppendOrUpsertMode({
-            runId: run.id,
-            configId: config.id,
-            spreadsheetId: config.spreadsheetId,
-            sheetName: config.sheetName,
-            accessToken: oauth.accessToken,
-            headers: prepared.selectedColumns,
-            rows: prepared.rows,
-            writeMode: effectiveWriteMode,
-            progressRunId: run.id
-          });
+    const result = await runAppendOrUpsertMode({
+      runId: run.id,
+      configId: config.id,
+      spreadsheetId: config.spreadsheetId,
+      sheetName: config.sheetName,
+      accessToken: oauth.accessToken,
+      headers: prepared.selectedColumns,
+      rows: prepared.rows,
+      writeMode: SheetWriteMode.UPSERT,
+      progressRunId: run.id
+    });
 
     const status = deriveRunStatus({
       rowsPrepared,
@@ -1858,6 +1804,7 @@ async function runManualSheetExportForDateInternal(params: {
   columnMode: SheetColumnMode;
   selectedColumns?: string[];
   campaignStatuses?: string[];
+  campaignNameSearch?: string;
 }) {
   await ensureAccountExportable(params.accountId);
 
@@ -1877,51 +1824,33 @@ async function runManualSheetExportForDateInternal(params: {
     runDate: params.runDate,
     dataMode: params.dataMode,
     campaignStatuses,
-    selectedColumns
+    selectedColumns,
+    campaignNameSearch: params.campaignNameSearch
   });
 
-  const matchingConfigId =
-    params.writeMode === SheetWriteMode.APPEND
-      ? null
-      : await findMatchingConfigForManualExport({
-          accountId: params.accountId,
-          spreadsheetId: normalizedSpreadsheetId,
-          sheetName: normalizedSheetName,
-          dataMode: params.dataMode,
-          columnMode: params.columnMode,
-          selectedColumns: prepared.selectedColumns,
-          campaignStatuses
-        });
+  const matchingConfigId = await findMatchingConfigForManualExport({
+    accountId: params.accountId,
+    spreadsheetId: normalizedSpreadsheetId,
+    sheetName: normalizedSheetName,
+    dataMode: params.dataMode,
+    columnMode: params.columnMode,
+    selectedColumns: prepared.selectedColumns,
+    campaignStatuses
+  });
 
   const runId = `MANUAL-${params.accountId}-${toDateOnlyString(params.runDate)}-${Date.now()}`;
-  const effectiveWriteMode =
-    params.writeMode === SheetWriteMode.UPSERT && !hasUpsertRowKeyColumns(prepared.selectedColumns)
-      ? SheetWriteMode.APPEND
-      : params.writeMode;
 
-  const result =
-    params.writeMode === SheetWriteMode.OVERWRITE
-      ? await runOverwriteMode({
-          runId,
-          configId: matchingConfigId ?? `MANUAL-${params.accountId}`,
-          spreadsheetId: normalizedSpreadsheetId,
-          sheetName: normalizedSheetName,
-          accessToken: oauth.accessToken,
-          headers: prepared.selectedColumns,
-          rows: prepared.rows,
-          persistRowState: matchingConfigId !== null
-        })
-      : await runAppendOrUpsertMode({
-          runId,
-          configId: matchingConfigId ?? `MANUAL-${params.accountId}`,
-          spreadsheetId: normalizedSpreadsheetId,
-          sheetName: normalizedSheetName,
-          accessToken: oauth.accessToken,
-          headers: prepared.selectedColumns,
-          rows: prepared.rows,
-          writeMode: params.writeMode,
-          persistRowState: matchingConfigId !== null ? true : false
-        });
+  const result = await runAppendOrUpsertMode({
+    runId,
+    configId: matchingConfigId ?? `MANUAL-${params.accountId}`,
+    spreadsheetId: normalizedSpreadsheetId,
+    sheetName: normalizedSheetName,
+    accessToken: oauth.accessToken,
+    headers: prepared.selectedColumns,
+    rows: prepared.rows,
+    writeMode: SheetWriteMode.UPSERT,
+    persistRowState: matchingConfigId !== null
+  });
 
   const status = deriveRunStatus({
     rowsPrepared: prepared.rows.length,
@@ -1933,7 +1862,6 @@ async function runManualSheetExportForDateInternal(params: {
   return {
     runDate: toDateOnlyString(params.runDate),
     status,
-    effectiveWriteMode,
     rowsPrepared: prepared.rows.length,
     rowsWritten: result.rowsWritten,
     rowsSkipped: result.rowsSkipped,
@@ -1957,7 +1885,7 @@ function mapManualRangeRun<T extends {
   };
 }
 
-async function initializeManualRangeOverwrite(run: {
+async function validateSpreadsheetAccess(run: {
   spreadsheetId: string;
   sheetName: string;
 }): Promise<void> {
@@ -1965,12 +1893,6 @@ async function initializeManualRangeOverwrite(run: {
   ensureSheetsScope(oauth.scopes);
 
   await ensureSheetTabExists({
-    spreadsheetId: run.spreadsheetId,
-    sheetName: run.sheetName,
-    accessToken: oauth.accessToken
-  });
-
-  await clearSheet({
     spreadsheetId: run.spreadsheetId,
     sheetName: run.sheetName,
     accessToken: oauth.accessToken
@@ -1997,11 +1919,11 @@ async function executeManualRangeRun(runId: string): Promise<void> {
   let successDays = run.successDays;
   let failedDays = run.failedDays;
   const dayErrors: string[] = [];
-  const dayWriteMode = run.writeMode === SheetWriteMode.OVERWRITE ? SheetWriteMode.APPEND : run.writeMode;
-
-  if (run.writeMode === SheetWriteMode.OVERWRITE && completedDays === 0) {
+  if (completedDays === 0) {
+    // Preflight: validate spreadsheet access before processing any days to avoid
+    // repeating the same error for each day.
     try {
-      await initializeManualRangeOverwrite({
+      await validateSpreadsheetAccess({
         spreadsheetId: run.spreadsheetId,
         sheetName: run.sheetName
       });
@@ -2051,11 +1973,12 @@ async function executeManualRangeRun(runId: string): Promise<void> {
         runDate,
         spreadsheetId: run.spreadsheetId,
         sheetName: run.sheetName,
-        writeMode: dayWriteMode,
+        writeMode: run.writeMode,
         dataMode: run.dataMode,
         columnMode: run.columnMode,
         selectedColumns: parseCsvList(run.selectedColumnsCsv),
-        campaignStatuses: parseCsvList(run.campaignStatusesCsv)
+        campaignStatuses: parseCsvList(run.campaignStatusesCsv),
+        campaignNameSearch: run.campaignNameSearch || undefined
       });
 
       const hasFailure =
@@ -2220,6 +2143,7 @@ export async function startManualSheetExportRange(params: {
   columnMode?: SheetColumnMode;
   selectedColumns?: string[];
   campaignStatuses?: string[];
+  campaignNameSearch?: string;
 }) {
   await ensureAccountExportable(params.accountId);
 
@@ -2245,6 +2169,7 @@ export async function startManualSheetExportRange(params: {
       columnMode,
       selectedColumnsCsv: toCsvList(selectedColumns),
       campaignStatusesCsv: toCsvList(campaignStatuses),
+      campaignNameSearch: params.campaignNameSearch?.trim() ?? '',
       dateFrom: window.dateFrom,
       dateTo: window.dateTo,
       totalDays: window.totalDays,
@@ -2278,6 +2203,7 @@ export async function runManualSheetExportForDate(params: {
   columnMode?: SheetColumnMode;
   selectedColumns?: string[];
   campaignStatuses?: string[];
+  campaignNameSearch?: string;
 }) {
   const runDate = params.runDate
     ? parseDateOnlyToUtcDayStart(params.runDate)
@@ -2292,7 +2218,8 @@ export async function runManualSheetExportForDate(params: {
     dataMode: params.dataMode ?? SheetDataMode.CAMPAIGN,
     columnMode: params.columnMode ?? SheetColumnMode.ALL,
     selectedColumns: params.selectedColumns,
-    campaignStatuses: params.campaignStatuses
+    campaignStatuses: params.campaignStatuses,
+    campaignNameSearch: params.campaignNameSearch
   });
 }
 
@@ -2541,18 +2468,3 @@ export async function getSheetExportHealth() {
   };
 }
 
-export async function canRunIngestionForDate(runDate: Date): Promise<boolean> {
-  const existingSuccessLike = await prisma.ingestionRun.findFirst({
-    where: {
-      runDate,
-      status: {
-        in: [IngestionRunStatus.SUCCESS, IngestionRunStatus.PARTIAL]
-      }
-    },
-    select: {
-      id: true
-    }
-  });
-
-  return !existingSuccessLike;
-}

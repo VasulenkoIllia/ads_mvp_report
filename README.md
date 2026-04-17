@@ -1,199 +1,359 @@
 # Ads MVP Report
 
-Google Ads -> DB -> Google Sheets сервіс з мінімальним UI для керування:
+**A minimal Google Ads reporting dashboard** — automatically pulls data from Google Ads API into PostgreSQL, then exports to Google Sheets (manually or on schedule).
 
-1. Авторизація тільки через allowlist Google-акаунтів.
-2. Sync підконтрольних MCC акаунтів.
-3. Ingestion у БД (ручний за період + авто щодня за вчора з rolling-refresh останніх днів).
-4. Export у Sheets (авто-конфіг на рівні акаунту + ручний разовий за період).
+**Core Features:**
+- Google OAuth login with email allowlist
+- Auto-sync Google Ads MCC accounts
+- Manual/scheduled ingestion to PostgreSQL (with rolling refresh for late conversions)
+- Manual/scheduled export to Google Sheets (UPSERT mode prevents duplicates)
+- Real-time progress tracking for ingestion & export runs
+- Support for new conversion value & ROAS metrics
 
-## Архітектура MVP
+## Quick Start (5 minutes)
 
-- `Backend`: Node.js + Express + Prisma + PostgreSQL
-- `Frontend`: React + Ant Design (вбудований у backend як `web/dist`)
-- `Scheduler`: внутрішній tick-планувальник з timezone `Europe/Kyiv`
-- `Google OAuth`: refresh token зберігається шифровано
+### 1. Prerequisites
+- Node.js 20+, npm
+- Docker (for PostgreSQL)
+- Google Cloud OAuth credentials
+- Google Ads Manager Account ID & Developer Token
 
-## Доступ і безпека
-
-- Доступ до `/api/v1/*` тільки після логіну Google.
-- Дозволені email задаються в `APP_ALLOWED_GOOGLE_EMAILS`.
-- Після OAuth callback створюється cookie-сесія `ads_mvp_session`.
-- Сесія живе `APP_SESSION_TTL_DAYS` (default `6`), потім обов'язковий повторний логін.
-- Увімкнений базовий `rate-limit`:
-  - `GET /api/v1/auth/login/start`
-  - ключові write-endpoints (manual runs, sync, update settings/configs)
-- У production обов'язкові:
-  - `APP_ALLOWED_GOOGLE_EMAILS`
-  - `APP_SESSION_SECRET`
-  - `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`
-
-## Логіка модулів UI
-
-- `Акаунти`: єдине місце для авто-конфігу Sheets (spreadsheet, sheet, поля, режими, active).
-- `Завантаження`: ручне ingestion у БД за період + перемикач авто ingestion за вчора.
-- `Експорт в Sheets`: ручний експорт за період запускається фоновим backend job (не залежить від вкладки і не змінює авто-конфіг).
-- `Планувальник`: cron-параметри ingestion/export та retries/limits.
-
-## Незалежність pipeline
-
-- `Ingestion` (Google Ads -> DB) і `Sheets Export` (DB -> Google Sheets) працюють як 2 незалежні scheduler-процеси.
-- Помилка ingestion-тікa не блокує sheets-тік в тому ж scheduler cycle.
-- Дані в Sheets завжди залежать від фактичної свіжості БД на момент export.
-
-## Стабільність і захист від гонок
-
-- Строга валідація дат `YYYY-MM-DD` (некоректні дати типу `2026-02-31` відхиляються).
-- Захист від race condition при старті ingestion через транзакційний Postgres advisory lock.
-- Stale-run auto-fail для ingestion/sheets базується на `updatedAt` (тобто "нема прогресу"), а не лише на `startedAt`.
-- Для довгих запусків оновлюється heartbeat/progress у БД під час обробки.
-- Для Google Sheets quota `ReadRequestsPerMinutePerUser` додано quota-aware backoff і скорочено зайві read-запити під час export.
-
-## Локальний запуск
-
-1. Встановити залежності:
+### 2. Install & Setup
 
 ```bash
+git clone <repo>
+cd ads_mvp_report
+npm install && npm run web:install
+docker compose up -d              # Start PostgreSQL
+cp .env.example .env              # Copy config template
+# Edit .env: add Google OAuth, Ads API credentials
+npm run db:generate
+npm run db:migrate:deploy
+npm run web:build
+npm run dev
+```
+
+Visit: `http://localhost:4010` — Login with allowed Google account
+
+### 3. First Steps
+
+1. **Sync accounts** — Click "Акаунти" → "Синхронізувати" button
+2. **Run ingestion** — Click "Дані" → Select date → "Запустити завантаження"
+3. **Export to Sheets** — Click "Google Sheets" → Create config or manual export
+4. **Enable scheduler** — Click "Планувальник" to configure daily runs
+
+---
+
+## Architecture
+
+- **Backend:** Node.js + Express + Prisma + PostgreSQL
+- **Frontend:** React + Ant Design (bundled in `web/dist`, served from backend)
+- **Scheduler:** Internal tick-based scheduler with `Europe/Kyiv` timezone
+- **Security:** Google OAuth 2.0 with refresh token encryption
+- **Database:** PostgreSQL required for production; SQLite for local dev
+
+## Key Concepts
+
+### Data Flow
+
+```
+Google Ads API (daily metrics)
+        ↓
+    [Ingestion Job] 
+        ↓
+PostgreSQL (CampaignDailyFact table)
+        ↓
+  [Sheets Export Job]
+        ↓
+Google Sheets (user's spreadsheet)
+```
+
+### Accounts & Permissions
+
+- **MCC (Master Customer Account):** Your manager account ID (provided to system)
+- **Child Accounts:** Auto-discovered from MCC; synced with status ENABLED only
+- **Ingestion Control:** Enable/disable ingestion per account via UI
+- **Sheets Config:** Configure automatic exports at account level
+
+### Run History
+
+- **IngestionRun:** Tracks pulling data from Ads API (date range, account count, status)
+- **SheetExportRun:** Tracks pushing data to Sheets (config, row count, status)
+- **Manual Ranges:** Multi-day exports tracked separately with daily progress
+
+### Data Freshness
+
+- **Coverage Endpoint:** Shows last data date per account
+- **Scheduler:** Daily checks last 3 days (catchup) + last 2 days (refresh for late conversions)
+- **No Data Blocking:** Sheets export waits for fresh ingestion data but doesn't block scheduler
+
+---
+
+## Security
+
+- **Authentication:** Google OAuth 2.0 only; email whitelist in `APP_ALLOWED_GOOGLE_EMAILS`
+- **Session:** HTTP-only cookie `ads_mvp_session` (signed with `APP_SESSION_SECRET`)
+- **Token Encryption:** Refresh tokens encrypted in DB with `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`
+- **Rate Limiting:** Login + write endpoints rate-limited by IP/email
+- **CORS:** Configurable origin whitelist
+- **Production Requirements:**
+  - `APP_ALLOWED_GOOGLE_EMAILS` — Set to your users
+  - `APP_SESSION_SECRET` — Long random string
+  - `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY` — Long random string
+
+## UI Pages
+
+- **Огляд (Overview):** Status cards, recent runs, data freshness alerts
+- **Акаунти (Accounts):** Account list, sync status, data freshness ("Дані до" column)
+- **Кампанії (Campaigns):** Browse campaigns by account/status, campaign-level search
+- **Дані (Ingestion):** Manual ingestion form, live progress, per-account progress panel
+- **Google Sheets:** Config management (auto-export per account), manual export form, campaign name filter, range exports
+- **Планувальник (Scheduler):** Edit schedule time, catchup/refresh windows, retry settings
+
+### UI Features
+
+- **Lazy Loading:** All pages code-split with React.lazy + Suspense
+- **Live Progress:** RunningBanner shows active ingestion/sheets runs with real-time progress
+- **Adaptive Polling:** Polling fast (3s) when active, slow (30s) when idle
+- **Language:** Ukrainian (Ant Design `uk_UA` locale)
+
+## New Features
+
+### Conversion Value & ROAS Metrics
+
+Both metrics automatically ingested from Google Ads API and exported to Sheets:
+
+- **Conversion Value** — Total value of all conversions (`metrics.conversions_value` in GAQL)
+  - Stored in DB as `CampaignDailyFact.conversionValue`
+  - Exported to Sheets as column `conversion_value`
+- **ROAS (Return on Ad Spend)** — Conversion value ÷ cost
+  - Computed during ingestion
+  - Stored in DB as `CampaignDailyFact.conversionValuePerCost`
+  - Exported to Sheets as column `conversion_value_per_cost`
+
+**Example:** ROAS 13.23 = 13.23₴ return per 1₴ spent
+
+### Campaign Name Filter
+
+Manual exports support filtering campaigns by name (case-insensitive substring match):
+
+```
+campaignNameSearch: "pmax"  // Matches "My PMAX Campaign", "pMax Ads", etc.
+```
+
+Available in:
+- `POST /sheets/runs/manual` — Single-date manual export
+- `POST /sheets/manual-range-runs` — Multi-day range export
+- `GET /sheets/preview` — Preview before export
+
+### Scheduler Enhancements
+
+- **Configurable Initial Delay** — `SCHEDULER_INITIAL_DELAY_SECONDS` prevents accidental runs on dev hot-reload
+- **Catchup Window** — Configurable days back to check (default 3 = check -3, -2, -1)
+- **Refresh Window** — Configurable recent days to re-process (default 2 = catch late conversions)
+- **Per-Account Disable** — Ingestion can be disabled per account without disabling system-wide scheduler
+
+## Reliability & Concurrency
+
+- **Date Validation:** Strict `YYYY-MM-DD` format; invalid dates rejected
+- **Ingestion Locking:** PostgreSQL advisory lock prevents concurrent runs
+- **Stale Run Detection:** Auto-fail runs that don't progress for `INGESTION_RUN_STALE_MINUTES` (heartbeat-based, not just timeout)
+- **Upsert Deduplication:** Sheets row hashing prevents duplicate rows on re-export
+- **Quota-Aware Retries:** Exponential backoff with quota-specific delays for Google Ads & Sheets APIs
+- **Pipeline Independence:** Ingestion failure doesn't block Sheets export; scheduler runs both independently each tick
+
+## Detailed Setup Guide
+
+### Prerequisites
+
+```bash
+# Check Node.js version
+node --version  # v20+
+
+# Install Docker (for PostgreSQL)
+docker --version  # Install from https://www.docker.com
+```
+
+### Step 1: Clone & Install
+
+```bash
+git clone <repo>
+cd ads_mvp_report
 npm install
 npm run web:install
 ```
 
-2. Підняти локальну БД (compose для локального тесту):
+### Step 2: Database Setup
 
 ```bash
 docker compose up -d
+# Verify PostgreSQL running: docker compose ps
 ```
 
-3. Підготувати `.env`:
+### Step 3: Configuration
 
 ```bash
 cp .env.example .env
+# Edit .env with your values:
+# - APP_ALLOWED_GOOGLE_EMAILS (your email)
+# - GOOGLE_OAUTH_CLIENT_ID (from Google Cloud Console)
+# - GOOGLE_OAUTH_CLIENT_SECRET (from Google Cloud Console)
+# - GOOGLE_OAUTH_REDIRECT_URI (http://localhost:4010/api/v1/google/oauth/callback)
+# - GOOGLE_ADS_DEVELOPER_TOKEN (from Google Ads account)
+# - GOOGLE_ADS_MANAGER_CUSTOMER_ID (your MCC customer ID)
 ```
 
-4. Заповнити Google змінні:
-
-- `GOOGLE_OAUTH_CLIENT_ID`
-- `GOOGLE_OAUTH_CLIENT_SECRET`
-- `GOOGLE_OAUTH_REDIRECT_URI` (для локального: `http://localhost:4010/api/v1/google/oauth/callback`)
-- `GOOGLE_ADS_DEVELOPER_TOKEN`
-- `GOOGLE_ADS_MANAGER_CUSTOMER_ID`
-- `APP_ALLOWED_GOOGLE_EMAILS`
-
-5. Ініціалізувати Prisma:
+### Step 4: Database Migration
 
 ```bash
 npm run db:generate
 npm run db:migrate:deploy
+
+# If P3005 error (baseline needed):
+# npx prisma migrate resolve --applied 20260311_init
+# npm run db:migrate:deploy
 ```
 
-Якщо отримав `P3005` (БД вже не порожня після старого `db push`), зроби baseline один раз:
-
-```bash
-npx prisma migrate resolve --applied 20260311_init
-npm run db:migrate:deploy
-```
-
-6. Зібрати web та запустити API:
+### Step 5: Start
 
 ```bash
 npm run web:build
 npm run dev
 ```
 
-7. Відкрити:
+Open `http://localhost:4010` in browser.
 
-- backend+UI: `http://localhost:4010`
-- dev frontend (опційно): `http://localhost:5173` (`npm run web:dev`)
+### Step 6 (Optional): Live Frontend Development
 
-## Прод-режим (Docker + Traefik)
+In another terminal:
+```bash
+npm run web:dev
+```
 
-У репозиторії є 2 compose-конфіги:
+Frontend runs on `http://localhost:5173` with live reload. Backend API still at 4010.
 
-1. `docker-compose.yml`:
-- локальний тестовий PostgreSQL (як зараз).
+## Production Deployment
 
-2. `docker-compose.deploy.yml`:
-- прод-розгортання;
-- один контейнер `app` (backend + frontend);
-- окремий контейнер `db`;
-- Traefik labels для домену `adsmvp.workflo.space`;
-- timezone у контейнерах `Europe/Kyiv`.
+### Option 1: Docker Compose with Traefik
 
-### Деплой-команди
+Two compose files included:
 
-1. Підготувати deploy env:
+- **`docker-compose.yml`** — Local dev (SQLite/PostgreSQL)
+- **`docker-compose.deploy.yml`** — Production (PostgreSQL + Traefik)
+
+### Deploy Steps
+
+1. **Prepare production config:**
 
 ```bash
 cp .env.deploy.example .env.deploy
 ```
 
-В `.env.deploy` перевір:
-- `DEPLOY_CORS_ORIGIN=https://adsmvp.workflo.space`
-- `GOOGLE_OAUTH_REDIRECT_URI=https://adsmvp.workflo.space/api/v1/google/oauth/callback`
-- `APP_ALLOWED_GOOGLE_EMAILS`, `APP_SESSION_SECRET`, `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`
-- за потреби rate-limit:
-  - `RATE_LIMIT_AUTH_LOGIN_START_WINDOW_MS`, `RATE_LIMIT_AUTH_LOGIN_START_MAX`
-  - `RATE_LIMIT_WRITE_WINDOW_MS`, `RATE_LIMIT_WRITE_MAX`
-- `PRISMA_MIGRATE_ON_START=true` (або `false`, якщо міграції застосовуєш вручну)
-- `SHEETS_MANUAL_MAX_RANGE_DAYS=180`
-- `SCHEDULER_CATCHUP_DAYS=3` (які дні перевіряє scheduler: `-3, -2, -1` від сьогодні)
-- `SCHEDULER_REFRESH_DAYS=2` (щодня перевигружає останні 2 дні для актуалізації конверсій)
+2. **Edit `.env.deploy`:**
 
-2. Запустити:
+```bash
+# Domain & SSL
+DEPLOY_CORS_ORIGIN=https://adsmvp.workflo.space
+GOOGLE_OAUTH_REDIRECT_URI=https://adsmvp.workflo.space/api/v1/google/oauth/callback
+
+# Required secrets
+APP_ALLOWED_GOOGLE_EMAILS=user@example.com
+APP_SESSION_SECRET=<generate with: openssl rand -hex 32>
+GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY=<generate with: openssl rand -hex 32>
+
+# Credentials
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+GOOGLE_ADS_DEVELOPER_TOKEN=...
+GOOGLE_ADS_MANAGER_CUSTOMER_ID=...
+
+# Database
+POSTGRES_PASSWORD=<strong-password>
+
+# Optional tuning
+SCHEDULER_CATCHUP_DAYS=3
+SCHEDULER_REFRESH_DAYS=2
+RATE_LIMIT_WRITE_MAX=30
+```
+
+3. **Deploy:**
 
 ```bash
 docker compose -f docker-compose.deploy.yml up -d --build
 docker compose -f docker-compose.deploy.yml logs -f app
 ```
 
-## Production checklist
+### Option 2: Manual Deployment
 
-Перед деплоєм:
+For non-Docker environments:
 
-1. `npm run check`
-2. Перевірити `APP_ALLOWED_GOOGLE_EMAILS`, `APP_SESSION_SECRET`, `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`.
-3. Перевірити `GOOGLE_OAUTH_REDIRECT_URI` під прод-домен.
-4. Перевірити `CORS_ORIGIN` (наприклад `https://adsmvp.workflo.space`).
-5. Переконатись, що в Google Ads MCC потрібні акаунти мають статус `ENABLED`.
+1. Install Node.js 20+
+2. Install PostgreSQL 12+
+3. Clone repo, `npm install && npm run web:install`
+4. Set `.env` variables (same as above)
+5. `npm run db:generate && npm run db:migrate:deploy`
+6. `npm run web:build && npm run build`
+7. `npm start` (runs compiled JS from `dist/main.js`)
+8. Use reverse proxy (nginx/Apache) for HTTPS & domain
 
-## Основні API
+## Pre-Deployment Checklist
 
-- Auth:
-  - `GET /api/v1/auth/session`
-  - `GET /api/v1/auth/login/start`
-  - `POST /api/v1/auth/logout`
+Before going live:
 
-- Google:
-  - `GET /api/v1/google/status`
-  - `GET /api/v1/google/oauth/callback`
-  - `POST /api/v1/google/accounts/sync`
-  - `GET /api/v1/google/accounts`
-  - `PATCH /api/v1/google/accounts/:accountId`
+- [ ] Run `npm run check` (lint + test + build succeeds)
+- [ ] Verify all required secrets set in `.env` (no defaults like `change_me_...`)
+- [ ] Test OAuth flow locally (login + callback works)
+- [ ] Test ingestion run locally (can pull Ads data)
+- [ ] Test Sheets export locally (can write to test spreadsheet)
+- [ ] Google Ads MCC account has ENABLED child accounts (disabled ones are skipped)
+- [ ] Google Cloud OAuth app has correct redirect URI registered
+- [ ] PostgreSQL database is running and accessible
+- [ ] Database migrations applied: `npm run db:migrate:deploy`
+- [ ] Build succeeds: `npm run build`
 
-- Ingestion:
-  - `POST /api/v1/ingestion/runs`
-  - `GET /api/v1/ingestion/preflight`
-  - `GET /api/v1/ingestion/runs`
-  - `GET /api/v1/ingestion/runs/:runId`
-  - `GET /api/v1/ingestion/health`
+## API Quick Reference
 
-- Sheets:
-  - `GET /api/v1/sheets/configs`
-  - `PUT /api/v1/sheets/configs/:accountId`
-  - `DELETE /api/v1/sheets/configs/:configId`
-  - `POST /api/v1/sheets/runs` (авто-конфіг)
-  - `POST /api/v1/sheets/runs/manual` (ручний разовий запуск)
-  - `POST /api/v1/sheets/manual-range-runs` (ручний фоновий запуск за період)
-  - `GET /api/v1/sheets/manual-range-runs`
-  - `GET /api/v1/sheets/manual-range-runs/:runId`
-  - `GET /api/v1/sheets/runs`
-  - `GET /api/v1/sheets/health`
+All endpoints require authentication (except login endpoints) and are prefixed with `/api/v1/`.
 
-- Scheduler:
-  - `GET /api/v1/scheduler/settings`
-  - `PATCH /api/v1/scheduler/settings`
-  - `GET /api/v1/scheduler/health`
+### Core Endpoints
 
-## Здоров'я сервісу
+**Authentication:**
+- `GET /auth/session` — Get current user
+- `GET /auth/login/start` — Start Google OAuth
+- `POST /auth/logout` — End session
 
-- `GET /healthz` перевіряє API + підключення до БД.
+**Accounts:**
+- `POST /google/accounts/sync` — Sync MCC child accounts
+- `GET /google/accounts` — List accounts
+- `GET /ingestion/coverage` — Data freshness per account
+
+**Ingestion (pull Ads → DB):**
+- `POST /ingestion/runs` — Start manual ingestion
+- `GET /ingestion/runs/active` — Get current run (for progress tracking)
+- `GET /ingestion/runs` — List run history
+- `GET /ingestion/preflight` — Validate request without executing
+
+**Sheets Export (push DB → Sheets):**
+- `GET /sheets/configs` — List export configs
+- `PUT /sheets/configs/:accountId` — Create/update auto-export config
+- `POST /sheets/runs/manual` — Single-date export
+- `POST /sheets/manual-range-runs` — Multi-day export (background job)
+- `GET /sheets/preview` — Preview rows before export
+
+**Scheduler:**
+- `GET /scheduler/settings` — Current schedule
+- `PATCH /scheduler/settings` — Update schedule
+
+**Health:**
+- `GET /healthz` — API + database check
+
+See [FEATURES.md](./docs/FEATURES.md) for complete API documentation with parameters & examples.
+
+---
+
+## Documentation
+
+- **[OVERVIEW.md](./docs/OVERVIEW.md)** — Architecture, data flow, core concepts
+- **[FEATURES.md](./docs/FEATURES.md)** — Complete API reference with examples
+- **[CONFIGURATION.md](./docs/CONFIGURATION.md)** — All environment variables explained
+- **[TESTING.md](./docs/TESTING.md)** — Test results, known data, debugging

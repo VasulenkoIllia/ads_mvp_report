@@ -171,11 +171,13 @@ export function resolveGoogleSheetsQuotaRetryDelayMs(
 ): number {
   const retryAfterMs = meta.retryAfterSeconds && meta.retryAfterSeconds > 0 ? meta.retryAfterSeconds * 1000 : 0;
 
-  const isReadPerMinuteLimit =
-    meta.quotaMetric === 'sheets.googleapis.com/read_requests' &&
-    meta.quotaLimit === 'ReadRequestsPerMinutePerUser';
+  const isPerMinutePerUserLimit =
+    meta.quotaLimit === 'ReadRequestsPerMinutePerUser' || meta.quotaLimit === 'WriteRequestsPerMinutePerUser';
+  const isSheetsReadWriteMetric =
+    meta.quotaMetric === 'sheets.googleapis.com/read_requests' ||
+    meta.quotaMetric === 'sheets.googleapis.com/write_requests';
 
-  if (isReadPerMinuteLimit) {
+  if (isPerMinutePerUserLimit && isSheetsReadWriteMetric) {
     return Math.max(fallbackDelayMs, retryAfterMs, 65_000);
   }
 
