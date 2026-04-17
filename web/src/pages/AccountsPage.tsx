@@ -1,15 +1,36 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Button, Input, Select, Space, Switch, Table, Tag, Tooltip, Typography, message,
+  Alert, Button, Empty, Input, Select, Space, Switch, Table, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { CheckCircleOutlined, ClearOutlined, CloudSyncOutlined, ReloadOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons';
+import {
+  CheckCircleOutlined, ClearOutlined, CloudSyncOutlined,
+  ReloadOutlined, SyncOutlined, WarningOutlined,
+} from '@ant-design/icons';
 import { accountsApi, type AdsAccount } from '../api/accounts.js';
 import { campaignsApi } from '../api/campaigns.js';
 import { ingestionApi, type CoverageItem } from '../api/ingestion.js';
+import { sheetsApi } from '../api/sheets.js';
 import { ErrorAlert } from '../components/ErrorAlert.js';
 import { StatusTag } from '../components/StatusTag.js';
 
 const { Title, Text } = Typography;
+
+/** 0=missing (worst), 1=stale, 2=not-monitored, 3=ok (best) */
+function rowPriority(a: AdsAccount, coverage: Map<string, CoverageItem>): number {
+  if (!a.ingestionEnabled) return 2;
+  const cov = coverage.get(a.id);
+  if (!cov?.lastFactDate) return 0;
+  if (!cov.hasDataForYesterday) return 1;
+  return 3;
+}
+
+function getRowClassName(a: AdsAccount, coverage: Map<string, CoverageItem>): string {
+  if (!a.ingestionEnabled) return '';
+  const cov = coverage.get(a.id);
+  if (!cov?.lastFactDate) return 'row-data-missing';
+  if (!cov.hasDataForYesterday) return 'row-data-stale';
+  return '';
+}
 
 function CoverageCell({ item, ingestionEnabled }: { item: CoverageItem | undefined; ingestionEnabled: boolean }) {
   if (!ingestionEnabled) {
@@ -44,11 +65,14 @@ function CoverageCell({ item, ingestionEnabled }: { item: CoverageItem | undefin
 export function AccountsPage() {
   const [accounts, setAccounts] = useState<AdsAccount[]>([]);
   const [coverage, setCoverage] = useState<Map<string, CoverageItem>>(new Map());
+  const [activeConfigIds, setActiveConfigIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [filterStatuses, setFilterStatuses] = useState<string[]>([]);
   const [filterIngestion, setFilterIngestion] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterFreshness, setFilterFreshness] = useState<'all' | 'ok' | 'stale' | 'missing'>('all');
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [bulkUpdating, setBulkUpdating] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncingCampaigns, setSyncingCampaigns] = useState<string | 'all' | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -58,19 +82,21 @@ export function AccountsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [acctResult, covResult] = await Promise.allSettled([
+      const [acctResult, covResult, cfgResult] = await Promise.allSettled([
         accountsApi.list({ isInMcc: true }),
         ingestionApi.getCoverage(),
+        sheetsApi.listConfigs({ active: true }),
       ]);
       if (acctResult.status === 'fulfilled') {
         setAccounts(acctResult.value.items.filter((a) => !a.isManager));
       }
       if (covResult.status === 'fulfilled') {
         const map = new Map<string, CoverageItem>();
-        for (const item of covResult.value.items) {
-          map.set(item.accountId, item);
-        }
+        for (const item of covResult.value.items) map.set(item.accountId, item);
         setCoverage(map);
+      }
+      if (cfgResult.status === 'fulfilled') {
+        setActiveConfigIds(new Set(cfgResult.value.items.map((c) => c.adsAccountId)));
       }
     } catch (e) { setError(e); }
     finally { setLoading(false); }
@@ -108,6 +134,17 @@ export function AccountsPage() {
     } catch (e) { setError(e); }
   }
 
+  async function handleBulkToggle(enabled: boolean) {
+    setBulkUpdating(true);
+    try {
+      await Promise.all(selectedRowKeys.map((id) => accountsApi.patch(id, { ingestionEnabled: enabled })));
+      setAccounts((prev) => prev.map((a) => selectedRowKeys.includes(a.id) ? { ...a, ingestionEnabled: enabled } : a));
+      void messageApi.success(`${enabled ? 'Увімкнено' : 'Вимкнено'} завантаження для ${selectedRowKeys.length} акаунтів`);
+      setSelectedRowKeys([]);
+    } catch (e) { setError(e); }
+    finally { setBulkUpdating(false); }
+  }
+
   const statusOptions = useMemo(() => {
     const unique = [...new Set(accounts.map((a) => a.googleStatus).filter(Boolean))] as string[];
     return unique.sort().map((s) => ({ value: s, label: s }));
@@ -127,7 +164,13 @@ export function AccountsPage() {
     return true;
   });
 
-  const hasActiveFilters = search || filterStatuses.length > 0 || filterIngestion !== 'all' || filterFreshness !== 'all';
+  // Sort: problems first (missing → stale → not-monitored → ok)
+  const sortedFiltered = useMemo(
+    () => [...filtered].sort((a, b) => rowPriority(a, coverage) - rowPriority(b, coverage)),
+    [filtered, coverage],
+  );
+
+  const hasActiveFilters = Boolean(search || filterStatuses.length > 0 || filterIngestion !== 'all' || filterFreshness !== 'all');
 
   function resetFilters() {
     setSearch('');
@@ -135,6 +178,18 @@ export function AccountsPage() {
     setFilterIngestion('all');
     setFilterFreshness('all');
   }
+
+  const emptyText = hasActiveFilters ? (
+    <Empty
+      image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description={
+        <Space direction="vertical" size={4} align="center">
+          <Text type="secondary">Нічого не знайдено за вибраними фільтрами</Text>
+          <Button size="small" icon={<ClearOutlined />} onClick={resetFilters}>Скинути фільтри</Button>
+        </Space>
+      }
+    />
+  ) : undefined;
 
   const columns = [
     {
@@ -170,6 +225,17 @@ export function AccountsPage() {
       render: (_: unknown, a: AdsAccount) => (
         <CoverageCell item={coverage.get(a.id)} ingestionEnabled={a.ingestionEnabled} />
       ),
+    },
+    {
+      title: 'Sheets',
+      key: 'sheets',
+      width: 80,
+      render: (_: unknown, a: AdsAccount) => (
+        activeConfigIds.has(a.id)
+          ? <Tooltip title="Є активний конфіг автоекспорту"><Tag color="blue" style={{ fontSize: 10 }}>Sheets ✓</Tag></Tooltip>
+          : <Text type="secondary" style={{ fontSize: 11 }}>—</Text>
+      ),
+      responsive: ['lg'] as ('lg')[],
     },
     {
       title: 'Завантаження',
@@ -208,7 +274,14 @@ export function AccountsPage() {
 
   return (
     <div>
+      <style>{`
+        tr.row-data-stale > td { background: #fffbe6 !important; }
+        tr.row-data-stale:hover > td { background: #fff3ba !important; }
+        tr.row-data-missing > td { background: #fff1f0 !important; }
+        tr.row-data-missing:hover > td { background: #ffe0de !important; }
+      `}</style>
       {contextHolder}
+
       <Space style={{ marginBottom: 16, justifyContent: 'space-between', width: '100%', flexWrap: 'wrap' }}>
         <Title level={4} style={{ margin: 0 }}>Рекламні акаунти</Title>
         <Space>
@@ -274,16 +347,53 @@ export function AccountsPage() {
         )}
       </Space>
 
+      {/* Bulk actions bar */}
+      {selectedRowKeys.length > 0 && (
+        <Alert
+          type="info"
+          style={{ marginBottom: 12, padding: '6px 12px' }}
+          message={
+            <Space wrap>
+              <Text>Обрано: <b>{selectedRowKeys.length}</b></Text>
+              <Button
+                size="small"
+                type="primary"
+                loading={bulkUpdating}
+                onClick={() => handleBulkToggle(true)}
+              >
+                Увімкнути завантаження
+              </Button>
+              <Button
+                size="small"
+                danger
+                loading={bulkUpdating}
+                onClick={() => handleBulkToggle(false)}
+              >
+                Вимкнути завантаження
+              </Button>
+              <Button size="small" onClick={() => setSelectedRowKeys([])}>Скасувати</Button>
+            </Space>
+          }
+        />
+      )}
+
       <Table
         size="small"
         loading={loading}
-        dataSource={filtered}
+        dataSource={sortedFiltered}
         columns={columns}
         rowKey="id"
+        rowClassName={(a) => getRowClassName(a, coverage)}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys as string[]),
+          preserveSelectedRowKeys: true,
+        }}
+        locale={{ emptyText }}
         pagination={{ pageSize: 30, showSizeChanger: false }}
         summary={() => (
           <Table.Summary.Row>
-            <Table.Summary.Cell index={0} colSpan={6}>
+            <Table.Summary.Cell index={0} colSpan={8}>
               <Text type="secondary">
                 Всього: {filtered.length} · Завантаження увімкнено: {enabledCount}
                 {staleCoverage.length > 0 && (

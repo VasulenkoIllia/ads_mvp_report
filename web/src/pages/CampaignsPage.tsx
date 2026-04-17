@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, Input, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { Button, Empty, Input, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
 import { ClearOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import { accountsApi, type AdsAccount } from '../api/accounts.js';
 import { campaignsApi, type Campaign } from '../api/campaigns.js';
@@ -71,6 +71,18 @@ export function CampaignsPage() {
     setStatus(undefined);
     setChannel(undefined);
   }
+
+  const emptyText = hasActiveFilters ? (
+    <Empty
+      image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description={
+        <Space direction="vertical" size={4} align="center">
+          <Text type="secondary">Нічого не знайдено за вибраними фільтрами</Text>
+          <Button size="small" icon={<ClearOutlined />} onClick={resetFilters}>Скинути фільтри</Button>
+        </Space>
+      }
+    />
+  ) : undefined;
 
   const columns = [
     {
@@ -208,6 +220,7 @@ export function CampaignsPage() {
         dataSource={filtered}
         columns={columns}
         rowKey="id"
+        locale={{ emptyText }}
         pagination={{ pageSize: 50, showSizeChanger: false }}
       />
     </div>

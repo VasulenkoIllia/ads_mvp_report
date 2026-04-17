@@ -121,6 +121,16 @@ export function OverviewPage({ onNavigate }: { onNavigate: (page: string) => voi
               prefix={<DatabaseOutlined />}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>активних для завантаження</Text>
+            {(ingHealth?.accounts?.missingFactsForYesterday ?? 0) > 0 && (
+              <Text type="danger" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                ❌ Без даних: {ingHealth!.accounts.missingFactsForYesterday} акаунтів
+              </Text>
+            )}
+            {(ingHealth?.accounts?.missingFactsForYesterday ?? 0) === 0 && accounts?.enabled && (ingHealth?.accounts?.withFactsForYesterday ?? 0) > 0 && (
+              <Text type="success" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                ✅ Всі активні акаунти актуальні
+              </Text>
+            )}
           </Card>
         </Col>
 
