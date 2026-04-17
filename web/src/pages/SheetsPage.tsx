@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert, App, Badge, Button, Card, Checkbox, Col, DatePicker, Descriptions, Divider,
   Drawer, Form, Input, Modal, Popconfirm, Progress, Row, Select, Space,
@@ -220,6 +220,9 @@ export function SheetsPage() {
   const [rangeRuns, setRangeRuns] = useState<ManualRangeRun[]>([]);
   const [loadingConfigs, setLoadingConfigs] = useState(false);
   const [loadingRuns, setLoadingRuns] = useState(false);
+  const [configSearch, setConfigSearch] = useState('');
+  const [configFilterActive, setConfigFilterActive] = useState<'all' | 'active' | 'inactive'>('all');
+  const [configFilterDataMode, setConfigFilterDataMode] = useState<string>('all');
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   const [editingConfig, setEditingConfig] = useState<SheetConfig | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -345,6 +348,17 @@ export function SheetsPage() {
     finally { setPreviewLoading(false); }
   }
 
+  const filteredConfigs = useMemo(() => configs.filter((c) => {
+    if (configSearch) {
+      const q = configSearch.toLowerCase();
+      if (!c.adsAccount.descriptiveName.toLowerCase().includes(q) && !c.adsAccount.customerId.includes(q)) return false;
+    }
+    if (configFilterActive === 'active' && !c.active) return false;
+    if (configFilterActive === 'inactive' && c.active) return false;
+    if (configFilterDataMode !== 'all' && c.dataMode !== configFilterDataMode) return false;
+    return true;
+  }), [configs, configSearch, configFilterActive, configFilterDataMode]);
+
   const configColumns = [
     {
       title: 'Акаунт',
@@ -465,7 +479,7 @@ export function SheetsPage() {
           label: 'Конфіги автоекспорту',
           children: (
             <>
-              <Space style={{ marginBottom: 12 }}>
+              <Space style={{ marginBottom: 8 }}>
                 <Button
                   type="primary"
                   icon={<PlusOutlined />}
@@ -475,10 +489,44 @@ export function SheetsPage() {
                 </Button>
                 <Button icon={<ReloadOutlined />} onClick={loadConfigs} loading={loadingConfigs}>Оновити</Button>
               </Space>
+              <Space wrap style={{ marginBottom: 12 }}>
+                <Input.Search
+                  placeholder="Пошук по акаунту…"
+                  value={configSearch}
+                  onChange={(e) => setConfigSearch(e.target.value)}
+                  style={{ width: 240 }}
+                  allowClear
+                />
+                <Select
+                  value={configFilterActive}
+                  onChange={setConfigFilterActive}
+                  style={{ width: 170 }}
+                  options={[
+                    { value: 'all', label: 'Стан: усі' },
+                    { value: 'active', label: 'Стан: активні' },
+                    { value: 'inactive', label: 'Стан: вимкнені' },
+                  ]}
+                />
+                <Select
+                  value={configFilterDataMode}
+                  onChange={setConfigFilterDataMode}
+                  style={{ width: 190 }}
+                  options={[
+                    { value: 'all', label: 'Режим: усі' },
+                    { value: 'CAMPAIGN', label: 'Режим: по кампаніях' },
+                    { value: 'DAILY_TOTAL', label: 'Режим: добовий підсумок' },
+                  ]}
+                />
+                {(configSearch || configFilterActive !== 'all' || configFilterDataMode !== 'all') && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    Знайдено: {filteredConfigs.length} з {configs.length}
+                  </Text>
+                )}
+              </Space>
               <Table
                 size="small"
                 loading={loadingConfigs}
-                dataSource={configs}
+                dataSource={filteredConfigs}
                 columns={configColumns}
                 rowKey="id"
                 pagination={{ pageSize: 20, showSizeChanger: false }}
