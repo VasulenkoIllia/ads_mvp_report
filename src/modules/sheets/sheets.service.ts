@@ -1838,6 +1838,10 @@ async function runManualSheetExportForDateInternal(params: {
     campaignStatuses
   });
 
+  // Manual range runs use a synthetic runId that is NOT a real SheetExportRun DB record.
+  // Passing it as lastRunId in SheetRowState would violate the FK constraint.
+  // persistRowState is therefore always false here — UPSERT still works correctly
+  // via sheet-content scanning (canBootstrapUpsertFromSheet) without needing DB row state.
   const runId = `MANUAL-${params.accountId}-${toDateOnlyString(params.runDate)}-${Date.now()}`;
 
   const result = await runAppendOrUpsertMode({
@@ -1849,7 +1853,7 @@ async function runManualSheetExportForDateInternal(params: {
     headers: prepared.selectedColumns,
     rows: prepared.rows,
     writeMode: SheetWriteMode.UPSERT,
-    persistRowState: matchingConfigId !== null
+    persistRowState: false
   });
 
   const status = deriveRunStatus({
