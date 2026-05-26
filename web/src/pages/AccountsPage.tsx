@@ -137,10 +137,25 @@ export function AccountsPage() {
   async function handleBulkToggle(enabled: boolean) {
     setBulkUpdating(true);
     try {
-      await Promise.all(selectedRowKeys.map((id) => accountsApi.patch(id, { ingestionEnabled: enabled })));
-      setAccounts((prev) => prev.map((a) => selectedRowKeys.includes(a.id) ? { ...a, ingestionEnabled: enabled } : a));
-      void messageApi.success(`${enabled ? 'Увімкнено' : 'Вимкнено'} завантаження для ${selectedRowKeys.length} акаунтів`);
-      setSelectedRowKeys([]);
+      const results = await Promise.allSettled(
+        selectedRowKeys.map((id) => accountsApi.patch(id, { ingestionEnabled: enabled })),
+      );
+      const okIds: string[] = [];
+      const failures: string[] = [];
+      results.forEach((res, idx) => {
+        const id = selectedRowKeys[idx];
+        if (res.status === 'fulfilled') okIds.push(id);
+        else failures.push(id);
+      });
+      setAccounts((prev) => prev.map((a) => okIds.includes(a.id) ? { ...a, ingestionEnabled: enabled } : a));
+      if (failures.length === 0) {
+        void messageApi.success(`${enabled ? 'Увімкнено' : 'Вимкнено'} завантаження для ${okIds.length} акаунтів`);
+        setSelectedRowKeys([]);
+      } else {
+        void messageApi.warning(`Оновлено ${okIds.length} з ${selectedRowKeys.length}. Помилок: ${failures.length}`);
+        setSelectedRowKeys(failures);
+        await load();
+      }
     } catch (e) { setError(e); }
     finally { setBulkUpdating(false); }
   }
@@ -150,8 +165,9 @@ export function AccountsPage() {
     return unique.sort().map((s) => ({ value: s, label: s }));
   }, [accounts]);
 
+  const normalizedSearch = search.trim().toLowerCase();
   const filtered = accounts.filter((a) => {
-    if (search && !a.descriptiveName.toLowerCase().includes(search.toLowerCase()) && !a.customerId.includes(search)) return false;
+    if (normalizedSearch && !a.descriptiveName.toLowerCase().includes(normalizedSearch) && !a.customerId.toLowerCase().includes(normalizedSearch)) return false;
     if (filterStatuses.length > 0 && !filterStatuses.includes(a.googleStatus ?? '')) return false;
     if (filterIngestion === 'enabled' && !a.ingestionEnabled) return false;
     if (filterIngestion === 'disabled' && a.ingestionEnabled) return false;

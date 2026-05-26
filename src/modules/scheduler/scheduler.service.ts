@@ -389,8 +389,14 @@ async function runIngestionSchedulerTick(settings: Awaited<ReturnType<typeof get
       (run) => run.status === IngestionRunStatus.FAILED || run.status === IngestionRunStatus.CANCELLED
     );
 
-    if (retryable?.finishedAt) {
-      const minutesSinceFailed = Math.floor((now.getTime() - retryable.finishedAt.getTime()) / (60 * 1000));
+    if (retryable) {
+      // Fall back to startedAt (or now) if finishedAt is missing (e.g., row was
+      // updated without finishedAt by a crash recovery path). Previously the
+      // `retryable?.finishedAt` guard silently skipped the retry-delay check
+      // when finishedAt was null, allowing the scheduler to re-run the same
+      // date many times in quick succession (see incident 2026-05-24).
+      const baseTime = retryable.finishedAt ?? now;
+      const minutesSinceFailed = Math.floor((now.getTime() - baseTime.getTime()) / (60 * 1000));
       if (minutesSinceFailed < settings.ingestionRetryDelayMin) {
         continue;
       }
@@ -512,8 +518,11 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
       const retryable = configRuns.find(
         (run) => run.status === SheetRunStatus.FAILED || run.status === SheetRunStatus.CANCELLED
       );
-      if (retryable?.finishedAt) {
-        const minutesSinceFailed = Math.floor((now.getTime() - retryable.finishedAt.getTime()) / (60 * 1000));
+      if (retryable) {
+        // See note in runIngestionSchedulerTick — guard against null finishedAt
+        // so we never skip the retry-delay check.
+        const baseTime = retryable.finishedAt ?? now;
+        const minutesSinceFailed = Math.floor((now.getTime() - baseTime.getTime()) / (60 * 1000));
         if (minutesSinceFailed < settings.sheetsRetryDelayMin) {
           continue;
         }

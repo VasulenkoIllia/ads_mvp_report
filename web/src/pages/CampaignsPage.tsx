@@ -57,8 +57,11 @@ export function CampaignsPage() {
     finally { setSyncing(false); }
   }
 
+  const normalizedSearch = search.trim().toLowerCase();
   const filtered = campaigns.filter((c) => {
-    if (search && !c.campaignName.toLowerCase().includes(search.toLowerCase()) && !c.campaignId.includes(search)) return false;
+    if (normalizedSearch
+      && !c.campaignName.toLowerCase().includes(normalizedSearch)
+      && !c.campaignId.toLowerCase().includes(normalizedSearch)) return false;
     if (channel && c.advertisingChannel !== channel) return false;
     return true;
   });
