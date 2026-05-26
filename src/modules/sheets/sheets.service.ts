@@ -763,10 +763,14 @@ async function prepareRowsForConfig(params: {
   campaignStatuses: string[];
   selectedColumns: SheetExportColumnKey[];
   campaignNameSearch?: string;
+  campaignNameExclude?: string[];
 }): Promise<PreparedExportRowsPayload> {
   const runDateText = toDateOnlyString(params.runDate);
   const window = getUtcDayWindow(params.runDate);
   const nameSearch = params.campaignNameSearch?.trim() ?? '';
+  const excludeTerms = (params.campaignNameExclude ?? [])
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0);
 
   const facts = await prisma.campaignDailyFact.findMany({
     where: {
@@ -776,7 +780,10 @@ async function prepareRowsForConfig(params: {
         lt: window.end
       },
       campaignStatus: params.campaignStatuses.length > 0 ? { in: params.campaignStatuses } : undefined,
-      ...(nameSearch ? { campaignName: { contains: nameSearch, mode: 'insensitive' } } : {})
+      ...(nameSearch ? { campaignName: { contains: nameSearch, mode: 'insensitive' } } : {}),
+      ...(excludeTerms.length > 0
+        ? { AND: excludeTerms.map((term) => ({ NOT: { campaignName: { contains: term, mode: 'insensitive' } } })) }
+        : {})
     },
     include: {
       adsAccount: {
@@ -1143,12 +1150,14 @@ function resolveSelectedColumns(config: {
 function mapSheetExportConfig<T extends {
   selectedColumnsCsv: string;
   campaignStatusesCsv: string;
+  campaignNameExcludeCsv?: string;
   writeMode?: SheetWriteMode | null;
   columnMode?: SheetColumnMode | null;
 }>(config: T): Omit<T, 'writeMode'> & {
   writeMode: SheetWriteMode;
   selectedColumns: string[];
   campaignStatuses: string[];
+  campaignNameExclude: string[];
 } {
   const selectedColumns = parseCsvList(config.selectedColumnsCsv);
 
@@ -1157,7 +1166,8 @@ function mapSheetExportConfig<T extends {
     writeMode: resolveForcedWriteMode(config.writeMode),
     selectedColumns:
       config.columnMode === SheetColumnMode.MANUAL ? ensureRequiredUpsertColumns(selectedColumns as SheetExportColumnKey[]) : selectedColumns,
-    campaignStatuses: parseCsvList(config.campaignStatusesCsv)
+    campaignStatuses: parseCsvList(config.campaignStatusesCsv),
+    campaignNameExclude: parseCsvList(config.campaignNameExcludeCsv ?? '')
   };
 }
 
@@ -1170,6 +1180,7 @@ export async function previewSheetExport(params: {
   selectedColumns?: string[];
   campaignStatuses?: string[];
   campaignNameSearch?: string;
+  campaignNameExclude?: string[];
   take?: number;
 }) {
   const take = Math.min(Math.max(params.take ?? 100, 1), 500);
@@ -1197,7 +1208,8 @@ export async function previewSheetExport(params: {
       dataMode,
       campaignStatuses,
       selectedColumns,
-      campaignNameSearch: params.campaignNameSearch
+      campaignNameSearch: params.campaignNameSearch,
+      campaignNameExclude: params.campaignNameExclude
     });
 
     for (const row of prepared.rows) {
@@ -1268,6 +1280,7 @@ export async function upsertSheetExportConfig(params: {
   columnMode?: SheetColumnMode;
   selectedColumns?: string[];
   campaignStatuses?: string[];
+  campaignNameExclude?: string[];
   active?: boolean;
 }) {
   await ensureAccountExportable(params.adsAccountId);
@@ -1281,6 +1294,9 @@ export async function upsertSheetExportConfig(params: {
       : ensureRequiredUpsertColumns(normalizeSelectedColumns(params.selectedColumns, SheetColumnMode.MANUAL));
 
   const campaignStatuses = normalizeCampaignStatuses(params.campaignStatuses);
+  const campaignNameExcludeCsv = toCsvList(
+    (params.campaignNameExclude ?? []).map((term) => term.trim()).filter((term) => term.length > 0)
+  );
 
   const include = {
     adsAccount: {
@@ -1304,6 +1320,7 @@ export async function upsertSheetExportConfig(params: {
     columnMode,
     selectedColumnsCsv: toCsvList(selectedColumns),
     campaignStatusesCsv: toCsvList(campaignStatuses),
+    campaignNameExcludeCsv,
     active: params.active
   };
 
@@ -1320,6 +1337,7 @@ export async function upsertSheetExportConfig(params: {
     columnMode,
     selectedColumnsCsv: toCsvList(selectedColumns),
     campaignStatusesCsv: toCsvList(campaignStatuses),
+    campaignNameExcludeCsv,
     active: params.active ?? true
   };
 
@@ -1622,7 +1640,8 @@ export async function runSheetExportConfigById(params: {
       runDate: params.runDate,
       dataMode: config.dataMode,
       campaignStatuses: normalizeCampaignStatuses(parseCsvList(config.campaignStatusesCsv)),
-      selectedColumns
+      selectedColumns,
+      campaignNameExclude: parseCsvList(config.campaignNameExcludeCsv)
     });
 
     const rowsPrepared = prepared.rows.length;
@@ -1827,6 +1846,7 @@ async function runManualSheetExportForDateInternal(params: {
   selectedColumns?: string[];
   campaignStatuses?: string[];
   campaignNameSearch?: string;
+  campaignNameExclude?: string[];
 }) {
   await ensureAccountExportable(params.accountId);
 
@@ -1847,7 +1867,8 @@ async function runManualSheetExportForDateInternal(params: {
     dataMode: params.dataMode,
     campaignStatuses,
     selectedColumns,
-    campaignNameSearch: params.campaignNameSearch
+    campaignNameSearch: params.campaignNameSearch,
+    campaignNameExclude: params.campaignNameExclude
   });
 
   const matchingConfigId = await findMatchingConfigForManualExport({
@@ -2004,7 +2025,8 @@ async function executeManualRangeRun(runId: string): Promise<void> {
         columnMode: run.columnMode,
         selectedColumns: parseCsvList(run.selectedColumnsCsv),
         campaignStatuses: parseCsvList(run.campaignStatusesCsv),
-        campaignNameSearch: run.campaignNameSearch || undefined
+        campaignNameSearch: run.campaignNameSearch || undefined,
+        campaignNameExclude: parseCsvList(run.campaignNameExcludeCsv)
       });
 
       const hasFailure =
@@ -2170,6 +2192,7 @@ export async function startManualSheetExportRange(params: {
   selectedColumns?: string[];
   campaignStatuses?: string[];
   campaignNameSearch?: string;
+  campaignNameExclude?: string[];
 }) {
   await ensureAccountExportable(params.accountId);
 
@@ -2196,6 +2219,9 @@ export async function startManualSheetExportRange(params: {
       selectedColumnsCsv: toCsvList(selectedColumns),
       campaignStatusesCsv: toCsvList(campaignStatuses),
       campaignNameSearch: params.campaignNameSearch?.trim() ?? '',
+      campaignNameExcludeCsv: toCsvList(
+        (params.campaignNameExclude ?? []).map((term) => term.trim()).filter((term) => term.length > 0)
+      ),
       dateFrom: window.dateFrom,
       dateTo: window.dateTo,
       totalDays: window.totalDays,
@@ -2230,6 +2256,7 @@ export async function runManualSheetExportForDate(params: {
   selectedColumns?: string[];
   campaignStatuses?: string[];
   campaignNameSearch?: string;
+  campaignNameExclude?: string[];
 }) {
   const runDate = params.runDate
     ? parseDateOnlyToUtcDayStart(params.runDate)
@@ -2245,7 +2272,8 @@ export async function runManualSheetExportForDate(params: {
     columnMode: params.columnMode ?? SheetColumnMode.ALL,
     selectedColumns: params.selectedColumns,
     campaignStatuses: params.campaignStatuses,
-    campaignNameSearch: params.campaignNameSearch
+    campaignNameSearch: params.campaignNameSearch,
+    campaignNameExclude: params.campaignNameExclude
   });
 }
 

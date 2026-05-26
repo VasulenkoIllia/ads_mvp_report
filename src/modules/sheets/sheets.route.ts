@@ -44,6 +44,7 @@ const upsertConfigSchema = z.object({
   columnMode: z.nativeEnum(SheetColumnMode).optional(),
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
   campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  campaignNameExclude: z.array(z.string().trim().min(1).max(200)).max(30).optional(),
   active: z.boolean().optional()
 }).refine((value) => !(value.configId && value.createNew), {
   message: 'configId and createNew cannot be used together.'
@@ -64,7 +65,8 @@ const manualRunSchema = z.object({
   columnMode: z.nativeEnum(SheetColumnMode).optional(),
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
   campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
-  campaignNameSearch: z.string().trim().max(200).optional()
+  campaignNameSearch: z.string().trim().max(200).optional(),
+  campaignNameExclude: z.array(z.string().trim().min(1).max(200)).max(30).optional()
 });
 
 const manualRangeRunSchema = z.object({
@@ -78,7 +80,8 @@ const manualRangeRunSchema = z.object({
   columnMode: z.nativeEnum(SheetColumnMode).optional(),
   selectedColumns: z.array(z.string().trim().min(1).max(64)).max(40).optional(),
   campaignStatuses: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
-  campaignNameSearch: z.string().trim().max(200).optional()
+  campaignNameSearch: z.string().trim().max(200).optional(),
+  campaignNameExclude: z.array(z.string().trim().min(1).max(200)).max(30).optional()
 });
 
 const listRunsQuerySchema = z.object({
@@ -97,6 +100,7 @@ const previewQuerySchema = z.object({
   selectedColumns: z.string().optional(),
   campaignStatuses: z.string().optional(),
   campaignNameSearch: z.string().trim().max(200).optional(),
+  campaignNameExclude: z.string().max(2000).optional(),
   take: z.coerce.number().int().min(1).max(500).optional()
 });
 
@@ -188,6 +192,7 @@ sheetsRouter.put(
       columnMode: payload.columnMode,
       selectedColumns: payload.selectedColumns,
       campaignStatuses: payload.campaignStatuses,
+      campaignNameExclude: payload.campaignNameExclude,
       active: payload.active
     });
 
@@ -233,7 +238,8 @@ sheetsRouter.post(
       columnMode: payload.columnMode,
       selectedColumns: payload.selectedColumns,
       campaignStatuses: payload.campaignStatuses,
-      campaignNameSearch: payload.campaignNameSearch
+      campaignNameSearch: payload.campaignNameSearch,
+      campaignNameExclude: payload.campaignNameExclude
     });
 
     res.status(200).json(result);
@@ -256,7 +262,8 @@ sheetsRouter.post(
       columnMode: payload.columnMode,
       selectedColumns: payload.selectedColumns,
       campaignStatuses: payload.campaignStatuses,
-      campaignNameSearch: payload.campaignNameSearch
+      campaignNameSearch: payload.campaignNameSearch,
+      campaignNameExclude: payload.campaignNameExclude
     });
 
     res.status(200).json(result);
@@ -322,6 +329,9 @@ sheetsRouter.get(
       selectedColumns: payload.selectedColumns ? payload.selectedColumns.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       campaignStatuses: payload.campaignStatuses ? payload.campaignStatuses.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       campaignNameSearch: payload.campaignNameSearch,
+      campaignNameExclude: payload.campaignNameExclude
+        ? payload.campaignNameExclude.split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined,
       take: payload.take
     });
 

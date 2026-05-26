@@ -235,6 +235,7 @@ model AccountSheetConfig {
   columnMode          SheetColumnMode @default(ALL)
   selectedColumnsCsv  String         @default("")
   campaignStatusesCsv String         @default("")
+  campaignNameExcludeCsv String      @default("")
   active              Boolean        @default(true)
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
@@ -299,6 +300,7 @@ model SheetManualRangeRun {
   selectedColumnsCsv  String          @default("")
   campaignStatusesCsv String          @default("")
   campaignNameSearch  String          @default("")
+  campaignNameExcludeCsv String       @default("")
   dateFrom            DateTime
   dateTo              DateTime
   totalDays           Int

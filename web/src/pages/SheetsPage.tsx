@@ -121,6 +121,7 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
   const [sheetName, setSheetName] = useState('');
   const [dataMode, setDataMode] = useState('CAMPAIGN');
   const [campaignStatuses, setCampaignStatuses] = useState<string[]>(['ENABLED', 'PAUSED', 'REMOVED']);
+  const [campaignNameExcludeText, setCampaignNameExcludeText] = useState('');
   const [active, setActive] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -133,11 +134,14 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
       setSheetName(editing.sheetName);
       setDataMode(editing.dataMode);
       setCampaignStatuses(editing.campaignStatuses.length > 0 ? editing.campaignStatuses : ['ENABLED', 'PAUSED', 'REMOVED']);
+      setCampaignNameExcludeText((editing.campaignNameExclude ?? []).join(', '));
       setActive(editing.active);
     } else {
       setAccountId(undefined); setSpreadsheetId(''); setSheetName('');
       setDataMode('CAMPAIGN');
-      setCampaignStatuses(['ENABLED', 'PAUSED', 'REMOVED']); setActive(true);
+      setCampaignStatuses(['ENABLED', 'PAUSED', 'REMOVED']);
+      setCampaignNameExcludeText('');
+      setActive(true);
     }
     setError(null);
   }, [editing, open]);
@@ -148,6 +152,11 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
     if (!sheetName.trim()) { void messageApi.warning('Введіть назву аркуша'); return; }
     setSaving(true);
     try {
+      const campaignNameExclude = campaignNameExcludeText
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+
       await sheetsApi.upsertConfig(accountId, {
         // When `editing` is set we patch that specific config; otherwise we
         // explicitly request a brand-new config so we don't silently overwrite
@@ -159,6 +168,7 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
         sheetName: sheetName.trim(),
         dataMode,
         campaignStatuses,
+        campaignNameExclude,
         active,
       });
       void messageApi.success('Збережено');
@@ -207,6 +217,24 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
             onChange={(v) => setCampaignStatuses(v as string[])}
           />
         </Form.Item>
+        <Form.Item
+          label="Виключити кампанії (за назвою)"
+          help={
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Кампанії, у назвах яких є хоч одне з цих слів, не потраплять у вивантаження.
+              Декілька значень — через кому. Приклад: <Text code style={{ fontSize: 11 }}>_old, тест, archive</Text>.
+              Залиште порожнім — вивантажуються всі.
+            </Text>
+          }
+        >
+          <Input.TextArea
+            value={campaignNameExcludeText}
+            onChange={(e) => setCampaignNameExcludeText(e.target.value)}
+            placeholder="наприклад: _old, тест, archive"
+            autoSize={{ minRows: 1, maxRows: 3 }}
+            maxLength={2000}
+          />
+        </Form.Item>
         <Form.Item label="Активний">
           <Select value={String(active)} onChange={(v) => setActive(v === 'true')} options={[{ value: 'true', label: 'Так' }, { value: 'false', label: 'Ні' }]} style={{ width: 120 }} />
         </Form.Item>
@@ -242,6 +270,7 @@ export function SheetsPage() {
   const [rangeDataMode, setRangeDataMode] = useState('CAMPAIGN');
   const [rangeCampaignStatuses, setRangeCampaignStatuses] = useState<string[]>(['ENABLED', 'PAUSED', 'REMOVED']);
   const [rangeCampaignNameSearch, setRangeCampaignNameSearch] = useState('');
+  const [rangeCampaignNameExcludeText, setRangeCampaignNameExcludeText] = useState('');
   const [rangeRunning, setRangeRunning] = useState(false);
   const [previewResult, setPreviewResult] = useState<SheetPreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -289,6 +318,11 @@ export function SheetsPage() {
   async function doStartRangeRun() {
     setRangeRunning(true);
     try {
+      const rangeCampaignNameExclude = rangeCampaignNameExcludeText
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+
       await sheetsApi.startRangeRun({
         accountId: rangeAccountId!,
         dateFrom: rangeDates![0].format('YYYY-MM-DD'),
@@ -299,6 +333,7 @@ export function SheetsPage() {
         dataMode: rangeDataMode,
         campaignStatuses: rangeCampaignStatuses,
         campaignNameSearch: rangeCampaignNameSearch.trim() || undefined,
+        campaignNameExclude: rangeCampaignNameExclude.length > 0 ? rangeCampaignNameExclude : undefined,
       });
       void messageApi.success('Вивантаження запущено у фоні');
       await loadRangeRuns();
@@ -338,6 +373,12 @@ export function SheetsPage() {
     }
     setPreviewLoading(true);
     try {
+      const rangeCampaignNameExcludeCsv = rangeCampaignNameExcludeText
+        .split(',')
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0)
+        .join(',');
+
       const r = await sheetsApi.preview({
         accountId: rangeAccountId,
         dateFrom: rangeDates[0].format('YYYY-MM-DD'),
@@ -345,6 +386,7 @@ export function SheetsPage() {
         dataMode: rangeDataMode,
         campaignStatuses: rangeCampaignStatuses.join(','),
         campaignNameSearch: rangeCampaignNameSearch.trim() || undefined,
+        campaignNameExclude: rangeCampaignNameExcludeCsv || undefined,
         take: 100,
       });
       setPreviewResult(r);
@@ -611,9 +653,9 @@ export function SheetsPage() {
                     </Col>
                   </Row>
                   <Row gutter={16}>
-                    <Col xs={24} md={16}>
+                    <Col xs={24} md={12}>
                       <Form.Item
-                        label="Фільтр по назві кампанії"
+                        label="Включити (частина назви)"
                         extra={
                           <Text type="secondary" style={{ fontSize: 11 }}>
                             Залиште порожнім — вивантажити всі. Введіть частину назви — наприклад «DSA» або «Performance Max».
@@ -623,9 +665,28 @@ export function SheetsPage() {
                         <Input
                           value={rangeCampaignNameSearch}
                           onChange={(e) => setRangeCampaignNameSearch(e.target.value)}
-                          placeholder="Наприклад: DSA, Performance Max, пошук…"
+                          placeholder="Наприклад: DSA, Performance Max"
                           allowClear
                           prefix={<span style={{ color: '#bfbfbf', fontSize: 12 }}>🔍</span>}
+                        />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        label="Виключити (через кому)"
+                        extra={
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            Кампанії з цими словами в назві НЕ потраплять у вивантаження. Декілька значень — через кому. Приклад: <Text code style={{ fontSize: 11 }}>_old, тест, archive</Text>.
+                          </Text>
+                        }
+                      >
+                        <Input
+                          value={rangeCampaignNameExcludeText}
+                          onChange={(e) => setRangeCampaignNameExcludeText(e.target.value)}
+                          placeholder="Наприклад: _old, тест, archive"
+                          allowClear
+                          prefix={<span style={{ color: '#bfbfbf', fontSize: 12 }}>🚫</span>}
+                          maxLength={2000}
                         />
                       </Form.Item>
                     </Col>
