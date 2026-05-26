@@ -373,6 +373,22 @@ async function runIngestionSchedulerTick(settings: Awaited<ReturnType<typeof get
       })
     ]);
 
+    // TEMP DEBUG (remove after diagnosing scheduler-loop incident).
+    logger.info(
+      {
+        runDate: runDateText,
+        useRefreshPolicy,
+        windowStart: window.start.toISOString(),
+        windowEnd: window.end.toISOString(),
+        todayLocalWindowStart: todayLocalWindow.start.toISOString(),
+        todayLocalWindowEnd: todayLocalWindow.end.toISOString(),
+        completedAnyId: completedAny?.id ?? null,
+        schedulerRunsCount: schedulerRuns.length,
+        maxAttempts: settings.ingestionMaxDailyAttempts
+      },
+      'Scheduler ingestion guard check.'
+    );
+
     if (completedAny) {
       continue;
     }
