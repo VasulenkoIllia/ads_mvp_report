@@ -1409,14 +1409,36 @@ export async function upsertSheetExportConfig(params: {
     }
   }
 
-  const existingCount = await prisma.accountSheetConfig.count({
-    where: {
-      adsAccountId: params.adsAccountId
-    }
-  });
+  const [existingCount, duplicate] = await Promise.all([
+    prisma.accountSheetConfig.count({
+      where: {
+        adsAccountId: params.adsAccountId
+      }
+    }),
+    prisma.accountSheetConfig.findFirst({
+      where: {
+        adsAccountId: params.adsAccountId,
+        spreadsheetId: normalizedSpreadsheetId,
+        sheetName: normalizedSheetName
+      },
+      select: {
+        id: true
+      }
+    })
+  ]);
 
   if (existingCount >= MAX_SHEET_CONFIGS_PER_ACCOUNT) {
     throw new ApiError(400, `Too many sheet configs for account (max ${MAX_SHEET_CONFIGS_PER_ACCOUNT}).`);
+  }
+
+  // Prevent silent duplicates: two configs writing to the same destination
+  // (spreadsheetId + sheetName) would clobber each other on every export.
+  // Suggest editing the existing one instead, or using a different sheet name.
+  if (duplicate) {
+    throw new ApiError(
+      409,
+      'A sheet config with the same Spreadsheet ID and Sheet name already exists for this account. Edit it instead, or pick a different sheet name (e.g. "daily" vs "daily campaigns").'
+    );
   }
 
   const created = await prisma.accountSheetConfig.create({

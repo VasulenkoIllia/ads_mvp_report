@@ -149,7 +149,12 @@ function ConfigDrawer({ open, onClose, onSaved, accounts, editing }: ConfigFormP
     setSaving(true);
     try {
       await sheetsApi.upsertConfig(accountId, {
+        // When `editing` is set we patch that specific config; otherwise we
+        // explicitly request a brand-new config so we don't silently overwrite
+        // another existing config on the same account (e.g. one "Добовий
+        // підсумок" config and one "По кампаніях" config in parallel).
         configId: editing?.id,
+        createNew: !editing,
         spreadsheetId: spreadsheetId.trim(),
         sheetName: sheetName.trim(),
         dataMode,
