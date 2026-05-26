@@ -41,11 +41,20 @@ function getLocalDateTimeParts(date: Date, timezone: string): LocalDateTimeParts
   const read = (type: Intl.DateTimeFormatPartTypes): number =>
     Number.parseInt(parts.find((part) => part.type === type)?.value ?? '0', 10);
 
+  // Some ICU builds (observed on Node 20 + ICU 78 with en-US + hourCycle:'h23')
+  // emit hour="24" instead of "00" at local midnight. Date.UTC then interprets
+  // hour=24 as overflow into the next day, which corrupts every downstream
+  // calculation (e.g. todayLocalWindow shifts -24h, causing the scheduler to
+  // believe "today" is yesterday). Normalize hour=24 → 0 here. The reported
+  // day part is already correct for the midnight wall-clock, so we keep it.
+  const rawHour = read('hour');
+  const hour = rawHour === 24 ? 0 : rawHour;
+
   return {
     year: read('year'),
     month: read('month'),
     day: read('day'),
-    hour: read('hour'),
+    hour,
     minute: read('minute'),
     second: read('second')
   };
