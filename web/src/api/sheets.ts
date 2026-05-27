@@ -10,7 +10,7 @@ export type SheetConfig = {
   columnMode: string;
   selectedColumns: string[];
   campaignStatuses: string[];
-  campaignNameExclude: string[];
+  campaignNameExclude?: string[];
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -92,7 +92,7 @@ export const sheetsApi = {
     campaignStatuses?: string[];
     campaignNameSearch?: string;
     campaignNameExclude?: string[];
-  }) => post<{ runId: string }>('/sheets/manual-range-runs', params),
+  }) => post<{ run: ManualRangeRun }>('/sheets/manual-range-runs', params),
 
   listRangeRuns: (filters?: { accountId?: string; status?: string; take?: number }) =>
     get<{ items: ManualRangeRun[] }>(`/sheets/manual-range-runs${qs(filters ?? {})}`),

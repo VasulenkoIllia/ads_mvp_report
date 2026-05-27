@@ -543,6 +543,14 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
           },
           'Automatic sheet export run finished.'
         );
+
+        // Only count *successful* launches towards the per-tick break below.
+        // Previously `launchedAny = true` was set unconditionally after the
+        // try/catch, so an orphan/broken config that threw before creating a
+        // SheetExportRun would set launchedAny=true and break out of the
+        // runDates loop — preventing the scheduler from ever advancing to
+        // newer runDates (see 2026-05-27 incident with bom.com.ua config).
+        launchedAny = true;
       } catch (error) {
         logger.error(
           {
@@ -553,8 +561,6 @@ async function runSheetsSchedulerTick(settings: Awaited<ReturnType<typeof getOrC
           'Automatic sheet export run failed.'
         );
       }
-
-      launchedAny = true;
     }
 
     if (launchedAny) {

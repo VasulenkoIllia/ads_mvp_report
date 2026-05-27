@@ -742,8 +742,11 @@ async function processAccountForDate(params: {
     };
   } catch (error) {
     // 404 from Google Ads means the account/entity doesn't exist or is not accessible.
-    // Treat as SKIPPED — not a failure, data simply unavailable for this account.
-    const isNotFound = axios.isAxiosError(error) && error.response?.status === 404;
+    // 403 means the manager lost access (e.g. suspended/blocked account in MCC).
+    // Both are not infrastructure failures — treat as SKIPPED so a single
+    // inaccessible account doesn't push the whole IngestionRun into PARTIAL/FAILED.
+    const httpStatus = axios.isAxiosError(error) ? error.response?.status : undefined;
+    const isNotFound = httpStatus === 404 || httpStatus === 403;
 
     const message =
       error instanceof GoogleAdsQuotaExhaustedError

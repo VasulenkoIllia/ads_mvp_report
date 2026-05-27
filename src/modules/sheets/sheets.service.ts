@@ -1477,6 +1477,7 @@ async function findMatchingConfigForManualExport(params: {
   columnMode: SheetColumnMode;
   selectedColumns: SheetExportColumnKey[];
   campaignStatuses: string[];
+  campaignNameExclude?: string[];
 }): Promise<string | null> {
   const configs = await prisma.accountSheetConfig.findMany({
     where: {
@@ -1489,12 +1490,15 @@ async function findMatchingConfigForManualExport(params: {
     select: {
       id: true,
       selectedColumnsCsv: true,
-      campaignStatusesCsv: true
+      campaignStatusesCsv: true,
+      campaignNameExcludeCsv: true
     },
     orderBy: {
       updatedAt: 'desc'
     }
   });
+
+  const paramExclude = (params.campaignNameExclude ?? []).map((t) => t.trim()).filter(Boolean);
 
   const matched = configs.find((config) => {
     const configSelectedColumns =
@@ -1504,10 +1508,15 @@ async function findMatchingConfigForManualExport(params: {
             normalizeSelectedColumns(parseCsvList(config.selectedColumnsCsv), SheetColumnMode.MANUAL)
           );
     const configCampaignStatuses = normalizeCampaignStatuses(parseCsvList(config.campaignStatusesCsv));
+    // Match against the config's exclude list too — otherwise manual exports
+    // with a different exclude filter would write into a stranger config's
+    // SheetRowState (wrong baseline for UPSERT dedup).
+    const configExclude = parseCsvList(config.campaignNameExcludeCsv ?? '');
 
     return (
       areStringArraysEqual(configSelectedColumns, params.selectedColumns) &&
-      areStringSetsEqual(configCampaignStatuses, params.campaignStatuses)
+      areStringSetsEqual(configCampaignStatuses, params.campaignStatuses) &&
+      areStringSetsEqual(configExclude, paramExclude)
     );
   });
 
@@ -1621,7 +1630,14 @@ export async function runSheetExportConfigById(params: {
     throw new ApiError(404, 'Sheet export config not found.');
   }
 
-  await ensureAccountExportable(config.adsAccountId);
+  // NOTE: ensureAccountExportable is intentionally called *after* creating the
+  // SheetExportRun (inside the try/catch below). Calling it before the run
+  // record was created caused an infinite-retry loop for orphan configs
+  // (account became ineligible after the config was created): every 30s tick
+  // the scheduler would throw before any SheetExportRun row existed, so the
+  // `sheetsMaxDailyAttempts` guard could not stop further attempts. By
+  // creating the run first, an ineligible-account failure is now recorded as
+  // a FAILED SheetExportRun, and the per-day attempt limit applies.
 
   const run = await createSheetExportRunWithStartLock({
     configId: config.id,
@@ -1630,6 +1646,8 @@ export async function runSheetExportConfigById(params: {
   });
 
   try {
+    await ensureAccountExportable(config.adsAccountId);
+
     const oauth = await getGoogleOAuthRuntimeToken();
     ensureSheetsScope(oauth.scopes);
 
@@ -1878,7 +1896,8 @@ async function runManualSheetExportForDateInternal(params: {
     dataMode: params.dataMode,
     columnMode: params.columnMode,
     selectedColumns: prepared.selectedColumns,
-    campaignStatuses
+    campaignStatuses,
+    campaignNameExclude: params.campaignNameExclude
   });
 
   // Manual range runs use a synthetic runId that is NOT a real SheetExportRun DB record.
@@ -2004,15 +2023,27 @@ async function executeManualRangeRun(runId: string): Promise<void> {
       continue;
     }
 
-    const dayRun =
-      existingDay ??
-      (await prisma.sheetManualRangeRunDay.create({
-        data: {
-          manualRunId: run.id,
-          runDate,
-          status: SheetRunStatus.RUNNING
-        }
-      }));
+    // If an existing day row was left in RUNNING by a previous crash (no
+    // finishedAt), reset it back to RUNNING with a fresh startedAt so progress
+    // tracking is consistent. Without this reset the recovered row could be
+    // left in an inconsistent state if the previous process partially mutated
+    // it before crashing.
+    const dayRun = existingDay
+      ? await prisma.sheetManualRangeRunDay.update({
+          where: { id: existingDay.id },
+          data: {
+            status: SheetRunStatus.RUNNING,
+            startedAt: new Date(),
+            errorSummary: null
+          }
+        })
+      : await prisma.sheetManualRangeRunDay.create({
+          data: {
+            manualRunId: run.id,
+            runDate,
+            status: SheetRunStatus.RUNNING
+          }
+        });
 
     try {
       const result = await runManualSheetExportForDateInternal({
