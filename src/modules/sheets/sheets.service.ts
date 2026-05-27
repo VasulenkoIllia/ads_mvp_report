@@ -1751,6 +1751,29 @@ export async function runSheetExportConfigById(params: {
       }
     });
 
+    // Auto-deactivate orphan configs whose underlying account became
+    // structurally ineligible (left MCC, became a manager, or got CLOSED).
+    // This is a DB-state issue — it will not recover by itself, and leaving
+    // the config active means the scheduler will keep retrying every day,
+    // spamming FAILED runs. We only deactivate on the structural cause;
+    // transient errors (OAuth token, quota, network) keep `active=true` so
+    // they retry automatically next day.
+    if (error instanceof ApiError && error.statusCode === 400 && error.message.includes('not eligible for export')) {
+      const account = await prisma.adsAccount.findUnique({
+        where: { id: config.adsAccountId },
+        select: { isInMcc: true, isManager: true, googleStatus: true }
+      });
+      const structurallyBroken =
+        !!account &&
+        (!account.isInMcc || account.isManager || account.googleStatus === 'CLOSED');
+      if (structurallyBroken) {
+        await prisma.accountSheetConfig.update({
+          where: { id: config.id },
+          data: { active: false }
+        });
+      }
+    }
+
     if (error instanceof GoogleSheetsQuotaExhaustedError) {
       const retryAfterSeconds =
         error.meta.retryAfterSeconds ??

@@ -44,7 +44,7 @@ The system serves as a bridge between Google Ads (source of truth for daily perf
         ▼                  ▼                  ▼
 ┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐
 │   PostgreSQL    │ │ Google Ads   │ │ Google Sheets    │
-│   (Local DB)    │ │ API (v18)    │ │ Spreadsheets API │
+│   (Local DB)    │ │ API (v21)    │ │ Spreadsheets API │
 │                 │ │              │ │                  │
 │ • Accounts      │ │ • Campaign   │ │ • Write rows     │
 │ • Campaigns     │ │   metrics    │ │ • Upsert cells   │
@@ -155,7 +155,7 @@ The system serves as a bridge between Google Ads (source of truth for daily perf
              ▼
     ┌──────────────────────────┐
     │ Write to Google Sheets   │
-    │ - Mode: APPEND, UPSERT   │
+    │ - Mode: UPSERT only      │
     │ - Append headers         │
     │ - Batch write rows       │
     │ - Handle quota (backoff) │
@@ -221,6 +221,9 @@ Two types of "run" records:
 
 2. **SheetExportRun** — One attempt to write data to Sheets
    - Status: RUNNING → SUCCESS/FAILED/PARTIAL/SKIPPED
+   - SKIPPED has two meanings:
+     - `rowsPrepared === 0` → No data in DB for that date ("Немає даних")
+     - `rowsPrepared > 0` → All rows already up-to-date in Sheet ("Актуально")
    - Links to `AccountSheetConfig` (the destination)
 
 Both track: start/end times, row counts, error summaries.
@@ -230,11 +233,33 @@ Both track: start/end times, row counts, error summaries.
 Internal tick-based scheduler (not cron):
 
 - **Poll Interval:** `SCHEDULER_POLL_SECONDS` (default 30s)
-- **Timezone:** `Europe/Kyiv` (configurable)
+- **Timezone:** `Europe/Kyiv` (configurable per-deployment via SchedulerSettings.timezone)
 - **Logic:** Each tick checks if it's time to run ingestion or sheets based on scheduled hour/minute
 - **Catchup:** By default checks `-3, -2, -1` days relative to today (`SCHEDULER_CATCHUP_DAYS`)
 - **Refresh:** Also checks latest `SCHEDULER_REFRESH_DAYS` days each run (for late-arriving conversions)
 - **Rate Limiting:** `ingestionMaxDailyAttempts`, `sheetsMaxDailyAttempts` prevent runaway retries
+- **Per-tick behavior:** Within one tick, the scheduler runs at most ONE successful
+  export per loop iteration (`launchedAny=true` only after a successful run). A
+  failing config does NOT block the loop from advancing to newer runDates.
+- **Stale-RUNNING recovery:** Each tick first calls
+  `markStaleIngestionRunsAsFailed` / `markStaleSheetRunsAsFailed` to fail any
+  rows left in RUNNING beyond `INGESTION_RUN_STALE_MINUTES` /
+  `SHEETS_RUN_STALE_MINUTES` (process-crash recovery).
+
+### Orphan-config protection (added 2026-05-27)
+
+When the underlying Google Ads account for a Sheets config becomes structurally
+ineligible (left MCC, became a manager, or `googleStatus=CLOSED`), the next
+scheduler run for that config:
+
+1. Records a FAILED `SheetExportRun` with `errorSummary="...not eligible for export"`
+2. Reads the current `AdsAccount.isInMcc/isManager/googleStatus`
+3. If still structurally broken → sets `AccountSheetConfig.active = false`
+
+Result: the config self-deactivates after one bad run and stops spamming
+failed attempts. The user can re-enable it via UI once the account is back
+in MCC. Transient failures (OAuth, quota, network) do NOT deactivate the
+config — they retry next day per `sheetsMaxDailyAttempts`.
 
 ---
 
@@ -282,7 +307,8 @@ Scheduler tick runs every 30 seconds:
   "columnMode": "ALL",              // or MANUAL
   "selectedColumns": ["date", "campaign_name", "cost", "conversions"],
   "campaignStatuses": ["ENABLED"],  // optional: filter by status
-  "campaignNameSearch": "pmax",     // optional: case-insensitive contains
+  "campaignNameSearch": "pmax",     // optional: include — case-insensitive substring
+  "campaignNameExclude": ["_old", "тест", "archive"], // optional: exclude — any-match excludes
   "runDate": "2026-04-15"           // optional: default is yesterday
 }
 ```
@@ -302,10 +328,21 @@ Same parameters as manual, but with:
 
 If an `AccountSheetConfig` is `active=true`:
 
-1. Scheduler tick runs each day at configured time
-2. Fetches that account's latest daily facts
+1. Scheduler tick runs each day at configured time (default 01:10 Kyiv)
+2. Fetches that account's latest daily facts (filtered by `campaignStatusesCsv`,
+   then `campaignNameExcludeCsv` removes campaigns whose names contain any of
+   the listed substrings — case-insensitive)
 3. Writes to the configured Sheets spreadsheet/tab
 4. Mode: UPSERT (dedup by row key)
+
+**Multi-config per account:** An account may have multiple active configs that
+write to different `(spreadsheetId, sheetName)` destinations — e.g. one with
+`dataMode=DAILY_TOTAL` for a "daily summary" tab and one with
+`dataMode=CAMPAIGN` for a "by-campaign" tab. The "+ New config" UI flow sends
+`createNew: true` so a fresh config is created instead of overwriting the
+existing one. At the DB level, a partial unique index on
+`(adsAccountId, spreadsheetId, sheetName) WHERE active=true` prevents
+race-condition duplicates from concurrent upserts.
 
 ---
 
@@ -540,6 +577,17 @@ ads_mvp_report/
 3. **"OAuth token needs refresh"** → User must re-login (token expired)
 4. **"Scheduler not running"** → Check logs: `docker logs app` or console
 5. **"Google Sheets quota exceeded"** → Wait ~1 min; scheduler retries with backoff
+6. **"Scheduler keeps re-running yesterday over and over"** → A known ICU bug
+   in Node 20 + ICU 78 returns `hour=24` at local midnight. The fix is in
+   `src/lib/timezone.ts` (`rawHour === 24 ? 0 : rawHour`). If you ever see
+   thousands of identical SCHEDULER runs in 24h for the same `runDate`,
+   verify this normalization is still in place.
+7. **"Sheets auto-export stops advancing past a single runDate"** → Likely
+   an orphan config (account left MCC). Check
+   `SELECT id, "sheetName", a."isInMcc" FROM "AccountSheetConfig" c JOIN "AdsAccount" a ON a.id=c."adsAccountId" WHERE c.active=true AND a."isInMcc"=false`.
+   Since 2026-05-27, the scheduler auto-deactivates such configs after one
+   failed attempt — but a manual `UPDATE AccountSheetConfig SET active=false WHERE id='...'`
+   is the immediate remedy.
 
 **Logs:**
 

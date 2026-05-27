@@ -406,6 +406,12 @@ Runs all `.test.ts` files in `/tests` directory.
 
 **Current test coverage:**
 - `google-sheets-quota.test.ts` — Quota retry logic ✓
+- `google-sheets-errors.test.ts` — Sheets error mapping ✓
+- `google-ads-quota.test.ts` — Google Ads quota handling ✓
+- `timezone.test.ts` — Date utilities + ICU hour=24 midnight regression test ✓
+  (verifies `localDateTimeToUtc({2026,5,26}, 0, 0, 'Europe/Kyiv')` returns
+  `2026-05-25T21:00:00Z`, not the buggy `2026-05-24T21:00:00Z` that would
+  have caused the 2026-05-24 scheduler-loop incident)
 
 ### Type Checking
 

@@ -12,6 +12,10 @@ export class ApiError extends Error {
   }
 }
 
+// Track whether we've already kicked off a session-expired reload so multiple
+// concurrent 401 responses do not stack up reload() calls.
+let sessionExpiredHandled = false;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     credentials: 'include',
@@ -20,6 +24,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!res.ok) {
+    // 401 = session expired or user logged out. Force a full reload so the
+    // backend's auth gate redirects to the Google login page. Without this,
+    // the UI silently surfaces "Unauthorized" inside an ErrorAlert and the
+    // user has to refresh manually. Skip the reload for the login endpoint
+    // itself so the user can still see the error message that triggers it.
+    if (res.status === 401 && !sessionExpiredHandled && !path.startsWith('/auth/')) {
+      sessionExpiredHandled = true;
+      // Slight defer so the in-flight request finishes settling before reload.
+      setTimeout(() => { window.location.reload(); }, 50);
+    }
+
     let body: { message?: string; errorCode?: string; details?: unknown } = {};
     try { body = await res.json(); } catch { /* ignore */ }
     throw new ApiError(res.status, body.message ?? `HTTP ${res.status}`, body.details, body.errorCode);

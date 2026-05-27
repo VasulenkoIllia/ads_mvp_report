@@ -165,7 +165,7 @@ Lists all synced Google Ads accounts.
 **Response:**
 ```json
 {
-  "accounts": [
+  "items": [
     {
       "id": "account-id-123",
       "customerId": "123456789",
@@ -624,54 +624,34 @@ Returns all available columns for Sheets export.
 **Response:**
 ```json
 {
-  "columns": [
-    {
-      "key": "date",
-      "label": "Date",
-      "type": "string",
-      "numeric": false
-    },
-    {
-      "key": "customer_id",
-      "label": "Customer ID",
-      "type": "string",
-      "numeric": false
-    },
-    {
-      "key": "impressions",
-      "label": "Impressions",
-      "type": "number",
-      "numeric": true
-    },
-    {
-      "key": "cost",
-      "label": "Cost",
-      "type": "number",
-      "numeric": true
-    },
-    {
-      "key": "conversions",
-      "label": "Conversions",
-      "type": "number",
-      "numeric": true
-    },
-    {
-      "key": "conversion_value",
-      "label": "Conversion Value",
-      "type": "number",
-      "numeric": true
-    },
-    {
-      "key": "conversion_value_per_cost",
-      "label": "ROAS (Return on Ad Spend)",
-      "type": "number",
-      "numeric": true
-    }
+  "availableColumns": [
+    "date",
+    "customer_id",
+    "account_name",
+    "campaign_id",
+    "campaign_name",
+    "campaign_status",
+    "impressions",
+    "clicks",
+    "ctr_percent",
+    "average_cpc",
+    "cost",
+    "conversions",
+    "cost_per_conversion",
+    "conversion_value",
+    "conversion_value_per_cost",
+    "final_url_suffix",
+    "tracking_url_template",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content"
   ]
 }
 ```
 
-**Available columns:** date, customer_id, account_name, campaign_id, campaign_name, campaign_status, impressions, clicks, ctr_percent, average_cpc, cost, conversions, cost_per_conversion, conversion_value, conversion_value_per_cost, final_url_suffix, tracking_url_template, utm_source, utm_medium, utm_campaign, utm_term, utm_content
+**Note:** Returns a simple array of string column keys. When displayed in the UI, these are labeled and typed via frontend logic.
 
 ---
 
@@ -687,7 +667,7 @@ Lists all Sheets export configs.
 **Response:**
 ```json
 {
-  "configs": [
+  "items": [
     {
       "id": "config-123",
       "adsAccountId": "account-123",
@@ -725,21 +705,26 @@ Creates or updates a Sheets export config.
   "columnMode": "ALL",
   "selectedColumns": ["date", "campaign_name", "cost", "conversions"],
   "campaignStatuses": ["ENABLED"],
+  "campaignNameExclude": ["_old", "тест", "archive"],
   "active": true
 }
 ```
 
 **Parameters:**
 - `configId` — Update existing (optional if `createNew: true`)
-- `createNew` — Create new (optional if `configId` provided)
+- `createNew` — Create a brand-new config instead of patching the latest existing one for the account (use this for "+ New config" flow; otherwise the call falls back to "update latest existing")
 - `spreadsheetId` — Google Sheet ID (required, min 10 chars)
-- `sheetName` — Tab name (required, 1-120 chars)
-- `writeMode` — Only `UPSERT` supported currently
+- `sheetName` — Tab name (required, 1-120 chars). Combined with `spreadsheetId` must be unique per account among active configs.
+- `writeMode` — `UPSERT` only (deduplicates rows by content hash)
 - `dataMode` — `CAMPAIGN` (per-row per-campaign) or `DAILY_TOTAL` (one row per day)
 - `columnMode` — `ALL` (use all available) or `MANUAL` (use `selectedColumns`)
 - `selectedColumns` — Array of column keys (required if `columnMode: MANUAL`)
 - `campaignStatuses` — Filter by status (empty = no filter)
-- `active` — Enable auto-export for this config
+- `campaignNameExclude` — Optional array of substrings; any campaign whose name (case-insensitive) contains at least one of these is dropped from the export. Use to exclude old/test/archived campaigns.
+- `active` — Enable auto-export for this config. Auto-set to `false` by the scheduler when the underlying Google Ads account becomes structurally ineligible (left MCC, became a manager, or CLOSED).
+
+**Errors:**
+- `409 Conflict` — Attempting `createNew: true` with `(spreadsheetId, sheetName)` already in use by an active config on this account. Pick a different sheet name (e.g. `daily` vs `daily campaigns`) or edit the existing config instead.
 
 **Response:** Same as GET request
 
@@ -809,17 +794,20 @@ Both parameters optional; defaults to yesterday and all active configs.
   "accountId": "account-123",
   "spreadsheetId": "1ABC...",
   "sheetName": "April 2026",
-  "writeMode": "UPSERT",
   "dataMode": "CAMPAIGN",
   "columnMode": "ALL",
   "selectedColumns": ["date", "campaign_name", "cost", "conversions"],
   "campaignStatuses": ["ENABLED"],
-  "campaignNameSearch": "pmax"
+  "campaignNameSearch": "pmax",
+  "campaignNameExclude": ["_old", "тест", "archive"]
 }
 ```
 
-**New Parameter:**
-- `campaignNameSearch` — Case-insensitive substring filter on campaign name (e.g., "pmax" matches "My PMAX Campaign")
+**Note:** `writeMode` is not needed in request (always UPSERT)
+
+**Parameters:**
+- `campaignNameSearch` — Case-insensitive substring filter on campaign name (e.g., "pmax" matches "My PMAX Campaign"). Include — only matching campaigns are exported.
+- `campaignNameExclude` — Optional array of substrings; case-insensitive any-match excludes (e.g. `["_old", "тест"]` drops "Brand_old" and "Test PMAX"). Applied after include filter.
 
 **Response:**
 ```json
@@ -852,14 +840,16 @@ Both parameters optional; defaults to yesterday and all active configs.
   "dateTo": "2026-04-15",
   "spreadsheetId": "1ABC...",
   "sheetName": "April 2026",
-  "writeMode": "UPSERT",
   "dataMode": "CAMPAIGN",
   "columnMode": "ALL",
   "selectedColumns": ["date", "campaign_name", "cost", "conversions"],
   "campaignStatuses": ["ENABLED"],
-  "campaignNameSearch": "pmax"
+  "campaignNameSearch": "pmax",
+  "campaignNameExclude": ["_old", "тест", "archive"]
 }
 ```
+
+**Note:** `writeMode` is not needed in request (always UPSERT)
 
 **Response:**
 ```json
@@ -883,6 +873,8 @@ Both parameters optional; defaults to yesterday and all active configs.
 
 **Max Range:** `SHEETS_MANUAL_MAX_RANGE_DAYS` (default 180 days)
 
+**Note:** The response field `campaignNameSearch` is also stored in `SheetManualRangeRun.campaignNameSearch` for filtering.
+
 ---
 
 ### GET /sheets/manual-range-runs
@@ -897,7 +889,7 @@ Lists manual range run history.
 **Response:**
 ```json
 {
-  "runs": [
+  "items": [
     {
       "id": "range-run-789",
       "adsAccountId": "account-123",
@@ -953,7 +945,7 @@ Lists all Sheets export runs.
 **Response:**
 ```json
 {
-  "runs": [
+  "items": [
     {
       "id": "export-456",
       "runDate": "2026-04-15",
