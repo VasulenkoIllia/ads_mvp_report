@@ -1,7 +1,9 @@
+import { BackfillTrigger } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
 import { ApiError, asyncHandler } from '../../lib/http.js';
 import { createAppSessionToken, setAppSessionCookie } from '../auth/auth.service.js';
+import { requestBackfill } from '../backfill/backfill.service.js';
 import {
   completeGoogleOAuth,
   disconnectGoogleOAuth,
@@ -92,6 +94,17 @@ googleRouter.get(
   asyncHandler(async (req, res) => {
     const payload = parseQuery(callbackQuerySchema, req.query);
     const result = await completeGoogleOAuth(payload);
+
+    // Token recovered after expiry → kick the auto catch-up (no-op unless
+    // BACKFILL_ENABLED). Never let a backfill hiccup break the OAuth callback.
+    if (result.recoveredFromReauth) {
+      try {
+        await requestBackfill(BackfillTrigger.REAUTH);
+      } catch (error) {
+        req.log.warn({ error }, 'Failed to request backfill after re-auth');
+      }
+    }
+
     const session = createAppSessionToken(result.grantedEmail ?? '');
     setAppSessionCookie(res, session.token, session.expiresAt);
 

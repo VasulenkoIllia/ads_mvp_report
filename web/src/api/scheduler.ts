@@ -1,4 +1,4 @@
-import { get, patch } from './client.js';
+import { get, patch, post } from './client.js';
 
 export type SchedulerSettings = {
   id: string;
@@ -30,9 +30,39 @@ export type SchedulerHealth = {
   };
 };
 
+export type BackfillStatus = 'IDLE' | 'REQUESTED' | 'INGESTING' | 'EXPORTING';
+
+export type BackfillState = {
+  id: string;
+  status: BackfillStatus;
+  trigger: 'REAUTH' | 'MANUAL' | null;
+  fromDate: string | null;
+  toDate: string | null;
+  cursorDate: string | null;
+  daysTotal: number;
+  daysDone: number;
+  requestedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
+};
+
+export type BackfillInfo = {
+  state: BackfillState;
+  config: {
+    enabled: boolean;
+    lookbackDays: number;
+    maxDays: number;
+    dayMaxAttempts: number;
+  };
+};
+
 export const schedulerApi = {
   getSettings: () => get<SchedulerSettings>('/scheduler/settings'),
   patchSettings: (data: Partial<Omit<SchedulerSettings, 'id' | 'updatedAt'>>) =>
     patch<SchedulerSettings>('/scheduler/settings', data),
   getHealth: () => get<SchedulerHealth>('/scheduler/health'),
+  getBackfill: () => get<BackfillInfo>('/scheduler/backfill'),
+  requestBackfill: () => post<{ requested: boolean; state: BackfillState }>('/scheduler/backfill'),
 };

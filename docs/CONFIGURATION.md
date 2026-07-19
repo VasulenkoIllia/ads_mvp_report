@@ -74,10 +74,16 @@ docker compose -f docker-compose.deploy.yml up -d --build
 - **Used by:** `docker-compose.deploy.yml` to create database
 - **Description:** Database credentials for Docker deployment. Match `DATABASE_URL` credentials.
 
+---
+
+## Docker Entrypoint Variables
+
 #### PRISMA_MIGRATE_ON_START
 - **Type:** Boolean
 - **Default:** `true`
-- **Description:** Automatically run `prisma migrate deploy` on app startup. Set to `false` if managing migrations manually.
+- **Read by:** `docker/start.sh` (Docker entrypoint script only)
+- **Description:** Automatically run `prisma migrate deploy` when the Docker container starts. The Node.js app does not read this variable; it is processed by the shell entrypoint before app startup.
+- **Note:** Set to `false` only if managing database migrations separately outside of Docker startup.
 
 ---
 
@@ -198,9 +204,9 @@ docker compose -f docker-compose.deploy.yml up -d --build
 
 #### GOOGLE_ADS_API_VERSION
 - **Type:** String
-- **Default:** `v18`
+- **Default:** `v24`
 - **Description:** Google Ads API version to use. Check Google documentation for latest stable version.
-- **Note:** Currently targets v18; update if Google releases new versions.
+- **Note:** Currently targets v24; update if Google releases new versions.
 
 #### GOOGLE_ADS_HTTP_TIMEOUT_MS
 - **Type:** Integer (milliseconds)
@@ -409,7 +415,7 @@ GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY=dev-secret-change-in-prod
 
 GOOGLE_ADS_DEVELOPER_TOKEN=xxx
 GOOGLE_ADS_MANAGER_CUSTOMER_ID=123-456-7890
-GOOGLE_ADS_API_VERSION=v18
+GOOGLE_ADS_API_VERSION=v24
 
 GOOGLE_SHEETS_HTTP_TIMEOUT_MS=30000
 
@@ -432,7 +438,6 @@ PORT=4010
 CORS_ORIGIN=https://adsmvp.workflo.space
 DATABASE_URL=postgresql://ads_mvp_report:STRONG_PASSWORD@db:5432/ads_mvp_report?schema=public
 DASHBOARD_ENABLED=true
-PRISMA_MIGRATE_ON_START=true
 
 APP_ALLOWED_GOOGLE_EMAILS=user1@example.com,user2@example.com
 APP_SESSION_SECRET=GENERATED_RANDOM_STRING_32_CHARS
@@ -449,7 +454,7 @@ GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY=GENERATED_RANDOM_STRING_32_CHARS
 
 GOOGLE_ADS_DEVELOPER_TOKEN=PROD_TOKEN
 GOOGLE_ADS_MANAGER_CUSTOMER_ID=123-456-7890
-GOOGLE_ADS_API_VERSION=v18
+GOOGLE_ADS_API_VERSION=v24
 
 SHEETS_MANUAL_MAX_RANGE_DAYS=180
 

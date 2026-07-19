@@ -1,6 +1,9 @@
+import { BackfillTrigger } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
+import { env } from '../../config/env.js';
 import { ApiError, asyncHandler } from '../../lib/http.js';
+import { getBackfillState, requestBackfill } from '../backfill/backfill.service.js';
 import { getSchedulerHealth, getSchedulerSettings, updateSchedulerSettings } from './scheduler.service.js';
 
 export const schedulerRouter = Router();
@@ -57,5 +60,33 @@ schedulerRouter.get(
   asyncHandler(async (_req, res) => {
     const result = await getSchedulerHealth();
     res.status(200).json(result);
+  })
+);
+
+schedulerRouter.get(
+  '/backfill',
+  asyncHandler(async (_req, res) => {
+    const state = await getBackfillState();
+    res.status(200).json({
+      state,
+      config: {
+        enabled: env.BACKFILL_ENABLED,
+        lookbackDays: env.BACKFILL_LOOKBACK_DAYS,
+        maxDays: env.BACKFILL_MAX_DAYS,
+        dayMaxAttempts: env.BACKFILL_DAY_MAX_ATTEMPTS
+      }
+    });
+  })
+);
+
+schedulerRouter.post(
+  '/backfill',
+  asyncHandler(async (_req, res) => {
+    const result = await requestBackfill(BackfillTrigger.MANUAL);
+    if (!result.requested) {
+      throw new ApiError(409, result.reason ?? 'Backfill could not be requested.');
+    }
+    const state = await getBackfillState();
+    res.status(202).json({ requested: true, state });
   })
 );

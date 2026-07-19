@@ -4,10 +4,11 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
 import { pinoHttp } from 'pino-http';
-import { Prisma } from '@prisma/client';
+import { OAuthConnectionStatus, Prisma } from '@prisma/client';
 import { env } from './config/env.js';
 import { ApiError, asyncHandler } from './lib/http.js';
 import { prisma } from './lib/prisma.js';
+import { getDefaultYesterdayRunDate, toDateOnlyString } from './lib/timezone.js';
 import { createRateLimiter } from './lib/rate-limit.js';
 import { authRouter } from './modules/auth/auth.route.js';
 import { ensureAppSession, getAppSessionFromRequest } from './modules/auth/auth.service.js';
@@ -59,6 +60,7 @@ function isWriteRateLimitedPath(pathname: string): boolean {
     pathname === '/campaigns/sync' ||
     pathname === '/ingestion/runs' ||
     pathname === '/scheduler/settings' ||
+    pathname === '/scheduler/backfill' ||
     pathname === '/sheets/runs' ||
     pathname === '/sheets/runs/manual' ||
     pathname === '/sheets/manual-range-runs' ||
@@ -161,6 +163,50 @@ async function bootstrap() {
     asyncHandler(async (_req, res) => {
       await prisma.$queryRaw`SELECT 1`;
       res.status(200).json({ ok: true, db: 'up' });
+    })
+  );
+
+  // Ops alerting endpoint for external uptime monitors (UptimeRobot/cron/etc).
+  // Returns 503 when the Google connection needs re-auth or data is stale, so a
+  // plain HTTP monitor alerts without needing auth or keyword matching.
+  // Intentionally separate from /healthz: the Docker healthcheck must keep
+  // passing while the token is expired, otherwise the container restart-loops.
+  // No secrets in the response — statuses and dates only.
+  app.get(
+    '/healthz/alert',
+    asyncHandler(async (_req, res) => {
+      const problems: string[] = [];
+
+      const [connection, latestFact] = await Promise.all([
+        prisma.googleOAuthConnection.findUnique({
+          where: { id: 'GOOGLE' },
+          select: { status: true, encryptedRefreshToken: true }
+        }),
+        prisma.campaignDailyFact.aggregate({ _max: { factDate: true } })
+      ]);
+
+      const oauthStatus = connection?.status ?? 'MISSING';
+      if (!connection || connection.status !== OAuthConnectionStatus.ACTIVE || !connection.encryptedRefreshToken) {
+        problems.push(`oauth:${oauthStatus}`);
+      }
+
+      const yesterday = getDefaultYesterdayRunDate(new Date(), 'Europe/Kyiv');
+      const lastFactDate = latestFact._max.factDate;
+      const staleDays = lastFactDate
+        ? Math.max(0, Math.floor((yesterday.getTime() - lastFactDate.getTime()) / (24 * 60 * 60 * 1000)))
+        : null;
+      if (staleDays === null || staleDays > env.HEALTH_MAX_STALE_DAYS) {
+        problems.push(`data:stale(${staleDays ?? 'no data'}d > ${env.HEALTH_MAX_STALE_DAYS}d)`);
+      }
+
+      res.status(problems.length === 0 ? 200 : 503).json({
+        ok: problems.length === 0,
+        problems,
+        oauthStatus,
+        lastFactDate: lastFactDate ? toDateOnlyString(lastFactDate) : null,
+        staleDays,
+        maxStaleDays: env.HEALTH_MAX_STALE_DAYS
+      });
     })
   );
 

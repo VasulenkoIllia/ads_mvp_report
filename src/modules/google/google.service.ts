@@ -832,7 +832,11 @@ export async function completeGoogleOAuth(params: { code: string; state: string 
     redirectPath: state.redirectPath,
     grantedEmail,
     managerCustomerId: normalizeCustomerId(env.GOOGLE_ADS_MANAGER_CUSTOMER_ID),
-    refreshTokenExpiresAt: refreshTokenExpiresAt?.toISOString() ?? null
+    refreshTokenExpiresAt: refreshTokenExpiresAt?.toISOString() ?? null,
+    // True when this re-auth recovers an existing connection whose token had
+    // expired (status was NEEDS_REAUTH). The route uses it to kick the backfill
+    // catch-up. Not set on a fresh connect (DISCONNECTED) or routine re-grant.
+    recoveredFromReauth: state.connection.status === OAuthConnectionStatus.NEEDS_REAUTH
   };
 }
 

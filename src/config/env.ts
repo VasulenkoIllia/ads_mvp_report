@@ -55,7 +55,7 @@ const envSchema = z.object({
 
   GOOGLE_ADS_DEVELOPER_TOKEN: z.string().optional(),
   GOOGLE_ADS_MANAGER_CUSTOMER_ID: z.string().optional(),
-  GOOGLE_ADS_API_VERSION: z.string().default('v18'),
+  GOOGLE_ADS_API_VERSION: z.string().default('v24'),
   GOOGLE_ADS_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
   GOOGLE_ADS_RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(4),
   GOOGLE_ADS_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(400),
@@ -73,7 +73,23 @@ const envSchema = z.object({
   SCHEDULER_POLL_SECONDS: z.coerce.number().int().min(10).max(300).default(30),
   SCHEDULER_CATCHUP_DAYS: z.coerce.number().int().min(1).max(14).default(3),
   SCHEDULER_REFRESH_DAYS: z.coerce.number().int().min(0).max(14).default(2),
-  SCHEDULER_INITIAL_DELAY_SECONDS: z.coerce.number().int().min(0).max(3600).default(0)
+  SCHEDULER_INITIAL_DELAY_SECONDS: z.coerce.number().int().min(0).max(3600).default(0),
+
+  // Auto catch-up ("backfill") after the Google token is refreshed post-expiry.
+  // Disabled by default: with BACKFILL_ENABLED=false the trigger and worker are
+  // no-ops, so deploying the code does not change existing behavior.
+  BACKFILL_ENABLED: booleanFromEnv.default(false),
+  // How many days before the last-known data day to re-pull (late-conversion buffer).
+  BACKFILL_LOOKBACK_DAYS: z.coerce.number().int().min(0).max(30).default(2),
+  // Safety cap on the total backfill span (bounds worst case: empty DB / very old anchor).
+  BACKFILL_MAX_DAYS: z.coerce.number().int().min(1).max(365).default(90),
+  // Retries for a transiently-failing day before the cursor advances past it.
+  BACKFILL_DAY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+
+  // /healthz/alert flags the service unhealthy when the freshest CampaignDailyFact
+  // is older than this many days behind "yesterday" (Kyiv). 2 tolerates one
+  // missed nightly run before alerting.
+  HEALTH_MAX_STALE_DAYS: z.coerce.number().int().min(0).max(30).default(2)
 });
 
 const parsed = envSchema.safeParse(process.env);

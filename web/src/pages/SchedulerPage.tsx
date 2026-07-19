@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Col, Descriptions, Divider, Form,
-  InputNumber, Row, Space, Switch, Tag, Tooltip, Typography, message,
+  InputNumber, Progress, Row, Space, Switch, Tag, Tooltip, Typography, message,
 } from 'antd';
-import { InfoCircleOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons';
-import { schedulerApi, type SchedulerHealth, type SchedulerSettings } from '../api/scheduler.js';
+import { CloudDownloadOutlined, InfoCircleOutlined, ReloadOutlined, SaveOutlined } from '@ant-design/icons';
+import { ApiError } from '../api/client.js';
+import { schedulerApi, type BackfillInfo, type SchedulerHealth, type SchedulerSettings } from '../api/scheduler.js';
 import { ErrorAlert } from '../components/ErrorAlert.js';
 import { StatusTag } from '../components/StatusTag.js';
 
@@ -13,6 +14,13 @@ const { Title, Text, Paragraph } = Typography;
 function fmtDate(iso: string | null | undefined) {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('uk-UA', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function fmtDay(iso: string | null | undefined) {
+  if (!iso) return '—';
+  // Run dates are UTC day-starts; format in UTC so a viewer in a negative-offset
+  // timezone doesn't see the previous day.
+  return new Date(iso).toLocaleDateString('uk-UA', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 function fmtTime(h: number, m: number) {
@@ -106,6 +114,139 @@ function CatchupRefreshCard({ catchupDays, refreshDays }: { catchupDays: number;
   );
 }
 
+/* ─── Backfill (token-recovery catch-up) card ────────────────────────────── */
+
+const BACKFILL_STATUS_LABEL: Record<string, string> = {
+  IDLE: 'Очікує',
+  REQUESTED: 'Запуск…',
+  INGESTING: 'Завантаження даних',
+  EXPORTING: 'Експорт у Sheets',
+};
+
+function BackfillCard() {
+  const [info, setInfo] = useState<BackfillInfo | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [messageApi, ctx] = message.useMessage();
+
+  async function load() {
+    try {
+      setInfo(await schedulerApi.getBackfill());
+    } catch {
+      /* 401 is handled globally by the api client; ignore transient errors here */
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  const status = info?.state.status ?? 'IDLE';
+  const running = status !== 'IDLE';
+
+  // Poll while a pass is in flight so progress updates and the button re-enables.
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => { void load(); }, 4000);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  async function handleRun() {
+    setSubmitting(true);
+    try {
+      await schedulerApi.requestBackfill();
+      void messageApi.success('Довантаження запущено');
+      await load();
+    } catch (e) {
+      // 409 "вже виконується" / вимкнено — показуємо як попередження, не помилку.
+      void messageApi.warning(e instanceof ApiError ? e.message : 'Не вдалося запустити довантаження');
+      await load();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const st = info?.state;
+  const cfg = info?.config;
+  const enabled = cfg?.enabled ?? false;
+  const disabled = !enabled || running || submitting;
+  const percent = st && st.daysTotal > 0 ? Math.round((st.daysDone / st.daysTotal) * 100) : 0;
+
+  const disabledReason = !enabled
+    ? 'Автодовантаження вимкнено (BACKFILL_ENABLED=false)'
+    : running
+      ? 'Довантаження вже виконується'
+      : undefined;
+
+  return (
+    <Card
+      size="small"
+      style={{ marginBottom: 16 }}
+      title={
+        <Space>
+          <CloudDownloadOutlined />
+          <Text strong>Довантаження даних</Text>
+          <Tag color={running ? 'processing' : 'default'}>{BACKFILL_STATUS_LABEL[status] ?? status}</Tag>
+        </Space>
+      }
+      extra={
+        <Tooltip title={disabledReason}>
+          <Button
+            type="primary"
+            icon={<CloudDownloadOutlined />}
+            loading={submitting}
+            disabled={disabled}
+            onClick={handleRun}
+          >
+            Довантажити дані
+          </Button>
+        </Tooltip>
+      }
+    >
+      <Paragraph style={{ fontSize: 13, marginBottom: running ? 8 : 0 }}>
+        Заповнює пропуски, що накопичилися поки токен Google був неактивний — від дня останніх даних
+        {cfg ? <> (мінус {cfg.lookbackDays} дн. буфера, максимум {cfg.maxDays} дн.)</> : null} і до вчора.
+        Запускається <strong>автоматично</strong> при оновленні токена; ця кнопка — для запуску вручну.
+      </Paragraph>
+
+      {!enabled && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 8 }}
+          message="Функцію вимкнено"
+          description="Увімкніть змінну середовища BACKFILL_ENABLED=true, щоб дозволити авто- та ручне довантаження."
+        />
+      )}
+
+      {running && st && (
+        <>
+          <Progress percent={percent} size="small" status="active" />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {BACKFILL_STATUS_LABEL[status]}: день {st.daysDone}/{st.daysTotal}
+            {st.fromDate && st.toDate ? <> · діапазон {fmtDay(st.fromDate)}…{fmtDay(st.toDate)}</> : null}
+            {st.cursorDate ? <> · поточний {fmtDay(st.cursorDate)}</> : null}
+          </Text>
+        </>
+      )}
+
+      {!running && st?.finishedAt && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Останнє довантаження завершено {fmtDate(st.finishedAt)}
+          {st.trigger ? <> ({st.trigger === 'REAUTH' ? 'авто після реконекту' : 'вручну'})</> : null}.
+        </Text>
+      )}
+
+      {st?.lastError && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 8 }}
+          message={running ? st.lastError : `Остання помилка: ${st.lastError}`}
+        />
+      )}
+      {ctx}
+    </Card>
+  );
+}
+
 /* ─── Page ───────────────────────────────────────────────────────────────── */
 
 export function SchedulerPage() {
@@ -181,6 +322,9 @@ export function SchedulerPage() {
           refreshDays={health.runtime.refreshDays}
         />
       )}
+
+      {/* Token-recovery catch-up (backfill) */}
+      <BackfillCard />
 
       {/* Current state */}
       {health && (

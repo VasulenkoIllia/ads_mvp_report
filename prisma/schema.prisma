@@ -64,6 +64,18 @@ enum SheetRunStatus {
   CANCELLED
 }
 
+enum BackfillStatus {
+  IDLE
+  REQUESTED
+  INGESTING
+  EXPORTING
+}
+
+enum BackfillTrigger {
+  REAUTH
+  MANUAL
+}
+
 model GoogleOAuthConnection {
   id                    String                @id @default("GOOGLE")
   status                OAuthConnectionStatus @default(DISCONNECTED)
@@ -397,4 +409,26 @@ model CampaignSyncRun {
 
   @@index([adsAccountId, startedAt])
   @@index([status, startedAt])
+}
+
+// Singleton (id='GLOBAL') that drives the auto catch-up ("backfill") worker.
+// Fills the ingestion + sheets gap left while the Google token was expired,
+// paced day-by-day and resumable across restarts. Additive: no existing model
+// depends on this; with BACKFILL_ENABLED=false nothing ever writes here.
+model BackfillState {
+  id             String          @id @default("GLOBAL")
+  status         BackfillStatus  @default(IDLE)
+  trigger        BackfillTrigger?
+  fromDate       DateTime?
+  toDate         DateTime?
+  cursorDate     DateTime?
+  cursorAttempts Int             @default(0)
+  daysTotal      Int             @default(0)
+  daysDone       Int             @default(0)
+  requestedAt    DateTime?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  lastError      String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 }

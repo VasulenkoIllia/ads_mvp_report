@@ -21,6 +21,7 @@ import {
   recoverRunningManualRangeRuns,
   runSheetExportConfigById
 } from '../sheets/sheets.service.js';
+import { recoverBackfill } from '../backfill/backfill.service.js';
 
 type SchedulerLogger = {
   info: (...args: unknown[]) => void;
@@ -598,6 +599,10 @@ export function startSchedulers(logger?: Partial<SchedulerLogger>) {
         ]);
 
         const recoveredManualRanges = await recoverRunningManualRangeRuns();
+
+        // Re-kick the token-expiry catch-up worker if a pass is in flight
+        // (survives restarts / resumes after a pause). No-op unless BACKFILL_ENABLED.
+        await recoverBackfill();
 
         if (staleIngestion > 0) {
           schedulerLogger.warn({ staleIngestion }, 'Auto-failed stale ingestion run(s).');
