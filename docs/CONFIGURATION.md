@@ -319,6 +319,63 @@ docker compose -f docker-compose.deploy.yml up -d --build
 
 ---
 
+## Backfill — Auto Catch-Up After Token Re-Auth (added 2026-07-19)
+
+When the Google refresh token expires, ingestion and Sheets exports stop and a
+data gap grows. The backfill worker closes that gap automatically: on OAuth
+re-auth (recovery from `NEEDS_REAUTH`) it computes the missing date range from
+the freshest `CampaignDailyFact` day and re-runs ingestion + Sheets export
+day-by-day, skipping days that are already complete. It can also be started
+manually via `POST /scheduler/backfill` or the «Довантажити дані» button on the
+Планувальник page.
+
+#### BACKFILL_ENABLED
+- **Type:** Boolean
+- **Default:** `false`
+- **Description:** Master switch for the backfill feature. When `false`, the
+  re-auth trigger and the worker are complete no-ops and existing behavior is
+  unchanged. Set to `true` in production to enable auto catch-up.
+
+#### BACKFILL_LOOKBACK_DAYS
+- **Type:** Integer
+- **Default:** `2`
+- **Range:** 0–30
+- **Description:** Extra days re-pulled *before* the last known data day (the
+  anchor) to refresh late conversions. Range start = `anchor − lookback`.
+
+#### BACKFILL_MAX_DAYS
+- **Type:** Integer
+- **Default:** `90`
+- **Range:** 1–365
+- **Description:** Safety cap on the total backfill span. Protects against an
+  empty database or a very old anchor exploding into an unbounded catch-up.
+
+#### BACKFILL_DAY_MAX_ATTEMPTS
+- **Type:** Integer
+- **Default:** `3`
+- **Range:** 1–10
+- **Description:** Transient-failure retries for a single day before the worker
+  advances past it. Quota exhaustion and token failures never burn attempts —
+  they pause the pass instead (cursor is preserved and resumes automatically).
+
+---
+
+## Health & Monitoring
+
+#### HEALTH_MAX_STALE_DAYS
+- **Type:** Integer
+- **Default:** `2`
+- **Range:** 0–30
+- **Description:** Threshold for `GET /healthz/alert`. The endpoint returns
+  `503` when the freshest `CampaignDailyFact` is more than this many days
+  behind "yesterday" (Kyiv), or when the Google connection is not `ACTIVE`.
+  Point an external uptime monitor (e.g. UptimeRobot) at
+  `https://<your-domain>/healthz/alert` to get notified the moment the token
+  expires. Docker's own healthcheck keeps using plain `/healthz` and is NOT
+  affected by token expiry.
+
+---
+
 ## Schedule Timing (Scheduler Settings)
 
 These are stored in DB (SchedulerSettings table) but have defaults:
@@ -462,6 +519,9 @@ SCHEDULER_POLL_SECONDS=30
 SCHEDULER_CATCHUP_DAYS=3
 SCHEDULER_REFRESH_DAYS=2
 SCHEDULER_INITIAL_DELAY_SECONDS=0
+
+# Auto catch-up after token re-auth (recommended for production)
+BACKFILL_ENABLED=true
 ```
 
 ---

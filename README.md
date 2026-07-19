@@ -7,6 +7,8 @@
 - Auto-sync Google Ads MCC accounts
 - Manual/scheduled ingestion to PostgreSQL (with rolling refresh for late conversions)
 - Manual/scheduled export to Google Sheets (UPSERT mode prevents duplicates)
+- **Auto catch-up (backfill) after token expiry** — on re-login the system refills the DB gap and re-exports it to all client spreadsheets automatically
+- Ops alerting endpoint `/healthz/alert` (503 on expired token or stale data) for uptime monitors
 - Real-time progress tracking for ingestion & export runs
 - Support for new conversion value & ROAS metrics
 
@@ -85,6 +87,8 @@ Google Sheets (user's spreadsheet)
 
 - **Coverage Endpoint:** Shows last data date per account
 - **Scheduler:** Daily checks last 3 days (catchup) + last 2 days (refresh for late conversions)
+- **Backfill:** Gaps longer than the catchup window (e.g. after token expiry) are auto-filled on OAuth re-login — from the last known data day through yesterday, ingestion + Sheets, skipping already-complete days (`BACKFILL_ENABLED=true`)
+- **Alerting:** `GET /healthz/alert` returns 503 when the token needs re-auth or data is stale — hook an uptime monitor to it
 - **No Data Blocking:** Sheets export waits for fresh ingestion data but doesn't block scheduler
 
 ---
@@ -161,6 +165,7 @@ Available in:
 - **Upsert Deduplication:** Sheets row hashing prevents duplicate rows on re-export
 - **Quota-Aware Retries:** Exponential backoff with quota-specific delays for Google Ads & Sheets APIs
 - **Pipeline Independence:** Ingestion failure doesn't block Sheets export; scheduler runs both independently each tick
+- **Resumable Backfill:** Catch-up state (phase + date cursor) is persisted in DB — survives restarts, pauses on quota/token failures without losing progress, and re-requesting while running is an atomic no-op (anti-spam)
 
 ## Detailed Setup Guide
 
@@ -343,9 +348,12 @@ All endpoints require authentication (except login endpoints) and are prefixed w
 **Scheduler:**
 - `GET /scheduler/settings` — Current schedule
 - `PATCH /scheduler/settings` — Update schedule
+- `GET /scheduler/backfill` — Auto catch-up state & progress
+- `POST /scheduler/backfill` — Start catch-up manually («Довантажити дані»)
 
 **Health:**
-- `GET /healthz` — API + database check
+- `GET /healthz` — API + database check (Docker healthcheck)
+- `GET /healthz/alert` — Ops alert: 503 on expired token / stale data (for uptime monitors)
 
 See [FEATURES.md](./docs/FEATURES.md) for complete API documentation with parameters & examples.
 

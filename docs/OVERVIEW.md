@@ -261,6 +261,45 @@ failed attempts. The user can re-enable it via UI once the account is back
 in MCC. Transient failures (OAuth, quota, network) do NOT deactivate the
 config — they retry next day per `sheetsMaxDailyAttempts`.
 
+### Token-expiry backfill (added 2026-07-19)
+
+The scheduler's rolling catchup window (`SCHEDULER_CATCHUP_DAYS`) cannot heal
+an outage longer than itself: when the Google refresh token expires (7 days in
+OAuth Testing mode), ingestion stops and any gap older than the window would
+previously stay unfilled forever, forcing a manual full re-pull.
+
+The backfill worker (`src/modules/backfill/backfill.service.ts`, feature-flag
+`BACKFILL_ENABLED`) closes such gaps automatically:
+
+1. **Trigger.** When an OAuth re-auth recovers a connection from
+   `NEEDS_REAUTH`, the callback route requests a backfill pass (`trigger=REAUTH`).
+   A pass can also be requested manually (`POST /scheduler/backfill`, UI button).
+2. **Range.** Computed from data, not timers: `from = MAX(factDate) −
+   BACKFILL_LOOKBACK_DAYS`, `to = yesterday (Kyiv)`, capped by `BACKFILL_MAX_DAYS`.
+3. **Ingestion phase.** Runs day-by-day through the standard
+   `runGoogleAdsIngestion` (fresh access token per day, existing retries and
+   quota handling). Days that already have a SUCCESS/PARTIAL run are skipped.
+4. **Sheets phase.** Exports each day to every active config through the
+   standard `runSheetExportConfigById` (UPSERT → no duplicates); days already
+   exported are skipped.
+5. **Resilience.** State (`BackfillState` singleton: phase + date cursor) lives
+   in the DB, so a restart resumes where it left off; the scheduler tick
+   re-kicks an in-flight pass every 30s. Quota exhaustion or a token that dies
+   mid-pass *pause* the pass without losing the cursor. Transient day failures
+   retry up to `BACKFILL_DAY_MAX_ATTEMPTS`, then the cursor moves on.
+6. **Anti-spam.** Requesting a pass while one is in flight is an atomic no-op
+   (`409`); the UI button is disabled while a pass runs.
+
+The worker runs *outside* the scheduler tick (own async loop, like manual
+range runs), so a long catch-up never blocks nightly scheduling. Backfill
+ingestion runs are recorded as `MANUAL` so their retries don't consume the
+scheduler's `ingestionMaxDailyAttempts`; sheet runs are recorded as
+`SCHEDULER` so the nightly tick recognizes exported days as complete.
+
+Paired with `GET /healthz/alert` (503 on `NEEDS_REAUTH` or stale data), the
+full recovery story is: monitor alerts → user re-logs in → backfill fills the
+DB gap and updates all client spreadsheets, no manual re-pull needed.
+
 ---
 
 ## Key Workflows
@@ -343,6 +382,23 @@ write to different `(spreadsheetId, sheetName)` destinations — e.g. one with
 existing one. At the DB level, a partial unique index on
 `(adsAccountId, spreadsheetId, sheetName) WHERE active=true` prevents
 race-condition duplicates from concurrent upserts.
+
+### Automatic Catch-Up After Token Expiry (Backfill)
+
+When the Google token expires, everything stops and a gap grows. Recovery is
+now a single human action:
+
+1. `GET /healthz/alert` returns `503` (`oauth:NEEDS_REAUTH`) → uptime monitor
+   notifies the operator
+2. Operator re-logs in via «Увійти через Google»
+3. The OAuth callback detects recovery from `NEEDS_REAUTH` and requests a
+   backfill pass automatically (`trigger=REAUTH`)
+4. Worker fills the DB gap day-by-day (skipping already-complete days), then
+   exports the same days to every active sheet config
+5. `/healthz/alert` returns to `200`; progress is visible on the Планувальник
+   page («Довантаження даних» card) and via `GET /scheduler/backfill`
+
+See "Token-expiry backfill" in Core Concepts for mechanics and guarantees.
 
 ---
 

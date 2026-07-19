@@ -1136,6 +1136,96 @@ Health status of scheduler.
 
 ---
 
+### GET /scheduler/backfill
+
+Current state of the auto catch-up (backfill) worker plus its configuration.
+
+**Response:**
+```json
+{
+  "state": {
+    "id": "GLOBAL",
+    "status": "EXPORTING",
+    "trigger": "REAUTH",
+    "fromDate": "2026-07-14T00:00:00.000Z",
+    "toDate": "2026-07-18T00:00:00.000Z",
+    "cursorDate": "2026-07-17T00:00:00.000Z",
+    "daysTotal": 5,
+    "daysDone": 3,
+    "requestedAt": "2026-07-19T10:57:12.000Z",
+    "startedAt": "2026-07-19T10:57:13.000Z",
+    "finishedAt": null,
+    "lastError": null
+  },
+  "config": {
+    "enabled": true,
+    "lookbackDays": 2,
+    "maxDays": 90,
+    "dayMaxAttempts": 3
+  }
+}
+```
+
+`status` lifecycle: `IDLE` → `REQUESTED` → `INGESTING` (fills the DB day-by-day)
+→ `EXPORTING` (exports each day to all active sheet configs) → `IDLE`.
+`trigger` is `REAUTH` when started automatically by an OAuth re-auth, `MANUAL`
+when started via the endpoint/UI button.
+
+---
+
+### POST /scheduler/backfill
+
+Manually request a catch-up pass («Довантажити дані» button). The range is
+computed automatically: from the freshest `CampaignDailyFact` day minus
+`BACKFILL_LOOKBACK_DAYS`, through yesterday (Kyiv), capped at
+`BACKFILL_MAX_DAYS`. Days already ingested/exported are skipped.
+
+**Response (202):**
+```json
+{
+  "requested": true,
+  "state": { "status": "REQUESTED", "trigger": "MANUAL" }
+}
+```
+
+**Errors:**
+- `409` — a pass is already in flight (anti-spam guard; the in-flight pass is
+  re-kicked instead of restarted), or `BACKFILL_ENABLED=false`
+- `429` — write rate limit
+
+---
+
+## Health & Monitoring (no auth, outside /api/v1)
+
+### GET /healthz
+
+Liveness check used by the Docker healthcheck. `200 {"ok":true,"db":"up"}`
+whenever the API and database are reachable — intentionally ignores token
+state so an expired token never restart-loops the container.
+
+### GET /healthz/alert
+
+Ops alerting endpoint for external uptime monitors (UptimeRobot, cron, etc).
+Returns `503` when the system needs human attention, `200` otherwise. No
+secrets in the response.
+
+**Response (healthy):**
+```json
+{ "ok": true, "problems": [], "oauthStatus": "ACTIVE", "lastFactDate": "2026-07-18", "staleDays": 0, "maxStaleDays": 2 }
+```
+
+**Response (needs attention, HTTP 503):**
+```json
+{ "ok": false, "problems": ["oauth:NEEDS_REAUTH", "data:stale(3d > 2d)"], "oauthStatus": "NEEDS_REAUTH", "lastFactDate": "2026-07-16", "staleDays": 3, "maxStaleDays": 2 }
+```
+
+Flags: Google connection not `ACTIVE` (token expired/disconnected) and/or the
+freshest fact older than `HEALTH_MAX_STALE_DAYS` behind yesterday (Kyiv).
+Typical recovery: re-login via Google → the backfill auto-fills the gap →
+endpoint returns to `200`.
+
+---
+
 ## Status Codes & Error Handling
 
 ### Success Responses
@@ -1182,7 +1272,10 @@ Health status of scheduler.
 3. **CampaignsPage** — Campaign browser by account/status
 4. **IngestionPage** — Manual ingestion trigger + live progress panel
 5. **SheetsPage** — Config management + manual export form with campaign name filter
-6. **SchedulerPage** — Scheduler settings, catchup/refresh explanation
+6. **SchedulerPage** — Scheduler settings, catchup/refresh explanation, and the
+   «Довантаження даних» card: live backfill status/progress (polled every 4s
+   while a pass runs) with a «Довантажити дані» button that is disabled while a
+   pass is in flight or when `BACKFILL_ENABLED=false`
 
 ### Key Hooks & Components
 
