@@ -19,7 +19,8 @@ import {
 import { ApiError } from '../../lib/http.js';
 import { prisma } from '../../lib/prisma.js';
 import { getDefaultYesterdayRunDate, getUtcDayWindow, parseDateOnlyToUtcDayStart, toDateOnlyString } from '../../lib/timezone.js';
-import { getGoogleOAuthRuntimeToken } from '../google/google.service.js';
+import { isInsufficientScopeError } from '../../lib/google-scopes.js';
+import { getGoogleOAuthRuntimeToken, recordMissingGoogleScope } from '../google/google.service.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -1723,6 +1724,13 @@ export async function runSheetExportConfigById(params: {
       error instanceof GoogleSheetsQuotaExhaustedError
         ? truncate(formatGoogleSheetsQuotaMessage(error.meta), 1500)
         : truncate(toErrorMessage(error), 1500);
+
+    // See the ingestion counterpart: a missing Sheets scope is a credential
+    // problem, not a config problem. Recording it makes ensureSheetsScope fail
+    // fast next time instead of spending Sheets quota on guaranteed 403s.
+    if (isInsufficientScopeError(error)) {
+      await recordMissingGoogleScope(env.GOOGLE_SHEETS_REQUIRED_SCOPE).catch(() => undefined);
+    }
 
     const progress = await prisma.sheetExportRun.findUnique({
       where: {

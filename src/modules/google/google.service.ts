@@ -7,6 +7,7 @@ import {
   type Prisma
 } from '@prisma/client';
 import { env } from '../../config/env.js';
+import { GOOGLE_ADS_SCOPE, getMissingScopes } from '../../lib/google-scopes.js';
 import { ApiError } from '../../lib/http.js';
 import { prisma } from '../../lib/prisma.js';
 import { assertAllowedGoogleLoginEmail } from '../auth/auth.service.js';
@@ -340,12 +341,17 @@ async function ensureConnection(): Promise<void> {
       status: OAuthConnectionStatus.DISCONNECTED,
       clientId: env.GOOGLE_OAUTH_CLIENT_ID ?? null,
       managerCustomerId: normalizeCustomerId(env.GOOGLE_ADS_MANAGER_CUSTOMER_ID),
-      scopesCsv: joinCsv(getGoogleOAuthScopes())
+      // Nothing is granted until an OAuth callback completes.
+      scopesCsv: ''
     },
     update: {
       clientId: env.GOOGLE_OAUTH_CLIENT_ID ?? undefined,
-      managerCustomerId: normalizeCustomerId(env.GOOGLE_ADS_MANAGER_CUSTOMER_ID) ?? undefined,
-      scopesCsv: joinCsv(getGoogleOAuthScopes())
+      managerCustomerId: normalizeCustomerId(env.GOOGLE_ADS_MANAGER_CUSTOMER_ID) ?? undefined
+      // scopesCsv is deliberately NOT reset here. This runs on every runtime
+      // token fetch, so overwriting it with the *requested* list republished a
+      // grant that may never have happened — it masked the 2026-08-26 outage
+      // and made ensureSheetsScope a no-op. Only completeGoogleOAuth (actual
+      // grant) and recordMissingGoogleScope (observed 403) may write it.
     }
   });
 }
@@ -379,6 +385,68 @@ async function fetchGrantedEmail(accessToken: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function getRequiredGoogleScopes(): string[] {
+  return [GOOGLE_ADS_SCOPE, env.GOOGLE_SHEETS_REQUIRED_SCOPE];
+}
+
+/**
+ * Ask Google which scopes an access token actually carries. Returns null when
+ * that cannot be determined, so callers can decide how to degrade.
+ *
+ * Errors are swallowed deliberately: an axios failure here would carry the
+ * access token inside its message/URL, and that must never reach logs or an
+ * errorSummary column.
+ */
+async function fetchTokenScopes(accessToken: string): Promise<string[] | null> {
+  try {
+    const response = await axios.get<{ scope?: string }>('https://oauth2.googleapis.com/tokeninfo', {
+      params: { access_token: accessToken },
+      timeout: env.GOOGLE_ADS_HTTP_TIMEOUT_MS
+    });
+
+    const raw = response.data?.scope;
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      return null;
+    }
+
+    return raw.split(/\s+/).filter((item) => item.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+/** Required scopes missing from a stored scopesCsv value. */
+export function getMissingRequiredScopes(scopesCsv: string | null | undefined): string[] {
+  return getMissingScopes(splitCsv(scopesCsv), getRequiredGoogleScopes());
+}
+
+/**
+ * Record that Google rejected a call because the stored token lacks `scope`.
+ * scopesCsv is the app's only view of what was granted, so correcting it makes
+ * the gap visible to /healthz/alert and to the local scope guards instead of
+ * burning quota on calls that can only ever 403.
+ */
+export async function recordMissingGoogleScope(scope: string): Promise<void> {
+  const connection = await prisma.googleOAuthConnection.findUnique({
+    where: { id: 'GOOGLE' },
+    select: { scopesCsv: true }
+  });
+
+  if (!connection) {
+    return;
+  }
+
+  const current = splitCsv(connection.scopesCsv);
+  if (!current.includes(scope)) {
+    return;
+  }
+
+  await prisma.googleOAuthConnection.update({
+    where: { id: 'GOOGLE' },
+    data: { scopesCsv: joinCsv(current.filter((item) => item !== scope)) }
+  });
 }
 
 async function getGoogleAccessToken(connectionId: string): Promise<string> {
@@ -782,10 +850,25 @@ export async function completeGoogleOAuth(params: { code: string; state: string 
   const accessToken = tokens.access_token ?? null;
   const fetchedEmail = accessToken ? await fetchGrantedEmail(accessToken) : null;
   const grantedEmail = fetchedEmail ? assertAllowedGoogleLoginEmail(fetchedEmail) : null;
-  const scopes =
+  // Determine what Google ACTUALLY granted. Never assume the requested list:
+  // if the operator leaves the Ads/Sheets checkboxes unticked on the consent
+  // screen, the connection still looks healthy (refresh keeps working) but
+  // every API call fails later with 403 "insufficient authentication scopes"
+  // — the 2026-08-26 outage. Trust order: token response -> tokeninfo probe.
+  let grantedScopes: string[] | null =
     typeof tokens.scope === 'string' && tokens.scope.trim().length > 0
       ? tokens.scope.split(/\s+/)
-      : getGoogleOAuthScopes();
+      : null;
+
+  if (!grantedScopes && accessToken) {
+    grantedScopes = await fetchTokenScopes(accessToken);
+  }
+
+  // Fail closed only with proof. If the grant could not be determined at all
+  // (tokeninfo unreachable), keep the previous optimistic behavior so a
+  // transient Google hiccup can never lock the operator out of reconnecting.
+  const missingScopes = grantedScopes ? getMissingScopes(grantedScopes, getRequiredGoogleScopes()) : [];
+  const scopes = grantedScopes ?? getGoogleOAuthScopes();
 
   if (!grantedEmail) {
     await prisma.googleOAuthState.update({
@@ -796,6 +879,21 @@ export async function completeGoogleOAuth(params: { code: string; state: string 
     });
 
     throw new ApiError(403, 'Google account email is missing or not allowed for this service.');
+  }
+
+  if (missingScopes.length > 0) {
+    await prisma.googleOAuthState.update({
+      where: { id: state.id },
+      data: {
+        usedAt: new Date()
+      }
+    });
+
+    throw new ApiError(
+      403,
+      'Google не надав усі потрібні дозволи. Повторіть вхід і позначте доступ до Google Ads та Google Sheets.',
+      { missingScopes }
+    );
   }
 
   const refreshTokenExpiresAt = deriveRefreshTokenExpiry(tokens) ?? state.connection.refreshTokenExpiresAt;
@@ -833,10 +931,14 @@ export async function completeGoogleOAuth(params: { code: string; state: string 
     grantedEmail,
     managerCustomerId: normalizeCustomerId(env.GOOGLE_ADS_MANAGER_CUSTOMER_ID),
     refreshTokenExpiresAt: refreshTokenExpiresAt?.toISOString() ?? null,
-    // True when this re-auth recovers an existing connection whose token had
-    // expired (status was NEEDS_REAUTH). The route uses it to kick the backfill
-    // catch-up. Not set on a fresh connect (DISCONNECTED) or routine re-grant.
-    recoveredFromReauth: state.connection.status === OAuthConnectionStatus.NEEDS_REAUTH
+    // True when this re-auth recovers a broken connection: either the token had
+    // expired (status was NEEDS_REAUTH) or the previous grant was missing a
+    // required scope, which stops ingestion just as effectively. The route uses
+    // it to kick the backfill catch-up. Not set on a fresh connect
+    // (DISCONNECTED) or a routine re-grant of an already-healthy connection.
+    recoveredFromReauth:
+      state.connection.status === OAuthConnectionStatus.NEEDS_REAUTH ||
+      getMissingRequiredScopes(state.connection.scopesCsv).length > 0
   };
 }
 

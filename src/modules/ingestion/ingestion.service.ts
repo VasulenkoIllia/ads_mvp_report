@@ -14,6 +14,7 @@ import {
   isGoogleAdsQuotaErrorSource,
   parseGoogleAdsQuotaExhaustedMeta
 } from '../../lib/google-ads-quota.js';
+import { GOOGLE_ADS_SCOPE, isInsufficientScopeError } from '../../lib/google-scopes.js';
 import { ApiError } from '../../lib/http.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -24,7 +25,7 @@ import {
   parseDateOnlyToUtcDayStart,
   toDateOnlyString
 } from '../../lib/timezone.js';
-import { getGoogleAdsRuntimeCredentials } from '../google/google.service.js';
+import { getGoogleAdsRuntimeCredentials, recordMissingGoogleScope } from '../google/google.service.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -760,6 +761,14 @@ async function processAccountForDate(params: {
       error instanceof GoogleAdsQuotaExhaustedError
         ? truncate(formatGoogleAdsQuotaMessage(error.meta), 1000)
         : truncate(toErrorMessage(error), 1000);
+
+    // "insufficient authentication scopes" is not a per-account problem: the
+    // token itself cannot call the API at all. Record it so /healthz/alert
+    // fires immediately instead of waiting for data to go stale. The run
+    // classification below is intentionally left untouched.
+    if (isInsufficientScopeError(error)) {
+      await recordMissingGoogleScope(GOOGLE_ADS_SCOPE).catch(() => undefined);
+    }
 
     if (isNotFound) {
       await prisma.ingestionAccountRun.update({

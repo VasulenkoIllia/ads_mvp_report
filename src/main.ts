@@ -12,6 +12,7 @@ import { getDefaultYesterdayRunDate, toDateOnlyString } from './lib/timezone.js'
 import { createRateLimiter } from './lib/rate-limit.js';
 import { authRouter } from './modules/auth/auth.route.js';
 import { ensureAppSession, getAppSessionFromRequest } from './modules/auth/auth.service.js';
+import { getMissingRequiredScopes } from './modules/google/google.service.js';
 import { campaignsRouter } from './modules/campaigns/campaigns.route.js';
 import { googleRouter } from './modules/google/google.route.js';
 import { ingestionRouter } from './modules/ingestion/ingestion.route.js';
@@ -180,7 +181,7 @@ async function bootstrap() {
       const [connection, latestFact] = await Promise.all([
         prisma.googleOAuthConnection.findUnique({
           where: { id: 'GOOGLE' },
-          select: { status: true, encryptedRefreshToken: true }
+          select: { status: true, encryptedRefreshToken: true, scopesCsv: true }
         }),
         prisma.campaignDailyFact.aggregate({ _max: { factDate: true } })
       ]);
@@ -188,6 +189,14 @@ async function bootstrap() {
       const oauthStatus = connection?.status ?? 'MISSING';
       if (!connection || connection.status !== OAuthConnectionStatus.ACTIVE || !connection.encryptedRefreshToken) {
         problems.push(`oauth:${oauthStatus}`);
+      }
+
+      // A token can refresh fine yet lack the Ads/Sheets scopes — it then looks
+      // ACTIVE while nothing works (2026-08-26 outage). DB-only check, no call
+      // to Google.
+      const missingScopes = connection ? getMissingRequiredScopes(connection.scopesCsv) : [];
+      if (missingScopes.length > 0) {
+        problems.push(`oauth:missing_scopes(${missingScopes.join(', ')})`);
       }
 
       const yesterday = getDefaultYesterdayRunDate(new Date(), 'Europe/Kyiv');
@@ -203,6 +212,7 @@ async function bootstrap() {
         ok: problems.length === 0,
         problems,
         oauthStatus,
+        missingScopes,
         lastFactDate: lastFactDate ? toDateOnlyString(lastFactDate) : null,
         staleDays,
         maxStaleDays: env.HEALTH_MAX_STALE_DAYS
