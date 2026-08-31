@@ -114,9 +114,32 @@ OAuth callback endpoint (called by Google).
 2. Exchanges code for tokens
 3. Fetches user email via Google userinfo API
 4. Validates email against `APP_ALLOWED_GOOGLE_EMAILS`
-5. Encrypts refresh token, stores in DB
-6. Sets `ads_mvp_session` cookie
-7. Redirects to dashboard
+5. **Verifies the granted scopes** (see below)
+6. Encrypts refresh token, stores in DB
+7. Sets `ads_mvp_session` cookie
+8. Kicks the backfill catch-up if this re-auth recovered a broken connection
+9. Redirects to dashboard
+
+**Scope verification (added 2026-08-31):**
+
+The granted scopes are taken from the token response, or — if Google omits
+them — from a `tokeninfo` probe. If a required scope (Google Ads, Google
+Sheets) is provably missing, the callback fails with `403` and the connection
+is left untouched:
+
+```json
+{
+  "message": "Google не надав усі потрібні дозволи. Повторіть вхід і позначте доступ до Google Ads та Google Sheets.",
+  "details": { "missingScopes": ["https://www.googleapis.com/auth/spreadsheets"] }
+}
+```
+
+This is what an operator sees when the Ads/Sheets checkboxes are left unticked
+on Google's consent screen. Without this check the connection looks healthy
+(the refresh token works) while every API call fails with 403 — the
+2026-08-26 outage. If the grant cannot be determined at all (tokeninfo
+unreachable), the connect proceeds as before, so a Google outage can never
+block reconnecting.
 
 ---
 
@@ -1216,11 +1239,16 @@ secrets in the response.
 
 **Response (needs attention, HTTP 503):**
 ```json
-{ "ok": false, "problems": ["oauth:NEEDS_REAUTH", "data:stale(3d > 2d)"], "oauthStatus": "NEEDS_REAUTH", "lastFactDate": "2026-07-16", "staleDays": 3, "maxStaleDays": 2 }
+{ "ok": false, "problems": ["oauth:NEEDS_REAUTH", "data:stale(3d > 2d)"], "oauthStatus": "NEEDS_REAUTH", "missingScopes": [], "lastFactDate": "2026-07-16", "staleDays": 3, "maxStaleDays": 2 }
 ```
 
-Flags: Google connection not `ACTIVE` (token expired/disconnected) and/or the
-freshest fact older than `HEALTH_MAX_STALE_DAYS` behind yesterday (Kyiv).
+Flags:
+- `oauth:<status>` — connection not `ACTIVE` (token expired/disconnected)
+- `oauth:missing_scopes(...)` — the stored grant lacks a required scope. A
+  token in this state still refreshes fine and reads `ACTIVE`, so this is the
+  only signal that separates "healthy" from "cannot call anything"
+- `data:stale(...)` — freshest fact older than `HEALTH_MAX_STALE_DAYS` behind
+  yesterday (Kyiv)
 Typical recovery: re-login via Google → the backfill auto-fills the gap →
 endpoint returns to `200`.
 

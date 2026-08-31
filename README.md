@@ -88,7 +88,7 @@ Google Sheets (user's spreadsheet)
 - **Coverage Endpoint:** Shows last data date per account
 - **Scheduler:** Daily checks last 3 days (catchup) + last 2 days (refresh for late conversions)
 - **Backfill:** Gaps longer than the catchup window (e.g. after token expiry) are auto-filled on OAuth re-login — from the last known data day through yesterday, ingestion + Sheets, skipping already-complete days (`BACKFILL_ENABLED=true`)
-- **Alerting:** `GET /healthz/alert` returns 503 when the token needs re-auth or data is stale — hook an uptime monitor to it
+- **Alerting:** `GET /healthz/alert` returns 503 when the token needs re-auth, the OAuth grant is missing a required scope, or data is stale — hook an uptime monitor to it
 - **No Data Blocking:** Sheets export waits for fresh ingestion data but doesn't block scheduler
 
 ---
@@ -98,6 +98,7 @@ Google Sheets (user's spreadsheet)
 - **Authentication:** Google OAuth 2.0 only; email whitelist in `APP_ALLOWED_GOOGLE_EMAILS`
 - **Session:** HTTP-only cookie `ads_mvp_session` (signed with `APP_SESSION_SECRET`)
 - **Token Encryption:** Refresh tokens encrypted in DB with `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`
+- **Scope Verification:** Login is rejected when Google's consent screen returns an incomplete grant (Ads/Sheets unticked), instead of storing a connection that looks healthy but cannot call anything
 - **Rate Limiting:** Login + write endpoints rate-limited by IP/email
 - **CORS:** Configurable origin whitelist
 - **Production Requirements:**

@@ -136,6 +136,11 @@ docker compose -f docker-compose.deploy.yml up -d --build
 - **Type:** Space-separated scope URIs
 - **Default:** `https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/userinfo.email openid`
 - **Description:** OAuth 2.0 scopes requested. Default includes: Google Ads API, Google Sheets, user info.
+- **Note:** This is what the app *requests*. What Google actually *granted* is
+  verified at the callback and stored in `GoogleOAuthConnection.scopesCsv`; a
+  login that omits the Ads or Sheets permission is rejected instead of being
+  stored as if complete. Adding a scope here therefore requires re-authorizing
+  before it takes effect.
 
 #### GOOGLE_OAUTH_STATE_TTL_MINUTES
 - **Type:** Integer
@@ -368,7 +373,8 @@ manually via `POST /scheduler/backfill` or the «Довантажити дані
 - **Range:** 0–30
 - **Description:** Threshold for `GET /healthz/alert`. The endpoint returns
   `503` when the freshest `CampaignDailyFact` is more than this many days
-  behind "yesterday" (Kyiv), or when the Google connection is not `ACTIVE`.
+  behind "yesterday" (Kyiv), when the Google connection is not `ACTIVE`, or
+  when the stored grant is missing a required scope.
   Point an external uptime monitor (e.g. UptimeRobot) at
   `https://<your-domain>/healthz/alert` to get notified the moment the token
   expires. Docker's own healthcheck keeps using plain `/healthz` and is NOT

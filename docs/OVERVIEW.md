@@ -44,7 +44,7 @@ The system serves as a bridge between Google Ads (source of truth for daily perf
         ▼                  ▼                  ▼
 ┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐
 │   PostgreSQL    │ │ Google Ads   │ │ Google Sheets    │
-│   (Local DB)    │ │ API (v21)    │ │ Spreadsheets API │
+│   (Local DB)    │ │ API (v24)    │ │ Spreadsheets API │
 │                 │ │              │ │                  │
 │ • Accounts      │ │ • Campaign   │ │ • Write rows     │
 │ • Campaigns     │ │   metrics    │ │ • Upsert cells   │
@@ -296,9 +296,44 @@ ingestion runs are recorded as `MANUAL` so their retries don't consume the
 scheduler's `ingestionMaxDailyAttempts`; sheet runs are recorded as
 `SCHEDULER` so the nightly tick recognizes exported days as complete.
 
-Paired with `GET /healthz/alert` (503 on `NEEDS_REAUTH` or stale data), the
-full recovery story is: monitor alerts → user re-logs in → backfill fills the
-DB gap and updates all client spreadsheets, no manual re-pull needed.
+Paired with `GET /healthz/alert` (503 on `NEEDS_REAUTH`, missing scopes, or
+stale data), the full recovery story is: monitor alerts → user re-logs in →
+backfill fills the DB gap and updates all client spreadsheets, no manual
+re-pull needed.
+
+### OAuth scope grants (added 2026-08-31)
+
+A second, quieter failure mode: the token is alive but the *grant* is
+incomplete. Google's consent screen lists Ads and Sheets as separate
+checkboxes; if one is left unticked the refresh token still works — the
+connection reads `ACTIVE` — while every API call returns
+`403 insufficient authentication scopes`. That is the 2026-08-26 outage: no
+`NEEDS_REAUTH`, so neither the alert nor the re-auth backfill trigger reacted,
+and the gap was only noticed by hand.
+
+`GoogleOAuthConnection.scopesCsv` is the app's record of what was actually
+granted, and three rules keep it honest:
+
+1. **Only real evidence writes it.** `completeGoogleOAuth` stores the grant
+   reported by Google (token response, or a `tokeninfo` probe when the
+   response omits it). `ensureConnection` no longer republishes the
+   *requested* list on every runtime token fetch — that overwrite is what
+   masked the outage and made `ensureSheetsScope` a no-op.
+2. **Incomplete grants are rejected at the door.** If a required scope is
+   provably missing the callback fails with `403` and a plain-language message
+   instead of storing a broken connection. If the grant cannot be determined
+   at all (tokeninfo unreachable), the connect proceeds as before, so a Google
+   hiccup can never block reconnecting.
+3. **Runtime 403s correct the record.** An "insufficient authentication
+   scopes" error from Ads or Sheets calls `recordMissingGoogleScope()`, which
+   removes that scope from `scopesCsv`. `/healthz/alert` then reports
+   `oauth:missing_scopes(...)`, `ensureSheetsScope` starts failing fast
+   instead of spending quota on guaranteed 403s, and the next correct login
+   counts as a recovery — firing the backfill catch-up.
+
+Detection matches the error *text*, not the bare status code, so an ordinary
+per-account 403 (a suspended customer) keeps its existing meaning and is still
+recorded as a per-account failure.
 
 ---
 
